@@ -947,39 +947,48 @@ export default function App() {
           setEnrich(null);
           return;
         }
-        const res = await fetch(`${API_BASE}/leads/${leadId}/enrich`, {
+        // Step 1: Use /api/apollo/company proxy (same working endpoint as Apollo tab)
+        const lead = leads.find(l => l.id === leadId);
+        if (!lead) { alert("Lead not found"); setEnrich(null); return; }
+
+        const companyRes = await fetch(`${API_BASE}/apollo/company`, {
           method:"POST",
           headers: { "Content-Type":"application/json", "x-apollo-key": apolloKey },
+          body: JSON.stringify({ company_name: lead.company_name }),
         });
-        const text = await res.text();
-        let data;
-        try { data = JSON.parse(text); } catch { 
-          alert(`Server error: ${text.slice(0,200)}`);
+        const companyData = await companyRes.json();
+
+        if (!companyRes.ok || !companyData.people?.length) {
+          alert(`No decision maker found for "${lead.company_name}" on Apollo`);
           setEnrich(null);
           return;
         }
-        if (!res.ok) {
-          alert(`Enrich failed: ${data.error}`);
-          setEnrich(null);
-          return;
-        }
-        if (data.success && data.contact) {
-          const c = data.contact;
-          // Update lead locally immediately without waiting for reload
-          setLeads(ls => ls.map(l => l.id !== leadId ? l : {
-            ...l,
-            first_name: c.first_name,
-            last_name: c.last_name,
-            contact_title: c.title || "Decision Maker",
-            contact_email: c.email,
-            email_verified: !!c.email,
-            score: c.email ? Math.max(l.score, 4) : l.score,
-            status: "queued",
-          }));
-          alert(`✅ Found: ${c.first_name} ${c.last_name} (${c.title || "Decision Maker"})${c.email ? " · " + c.email : " · No email found"}`);
-        } else {
-          alert("No decision maker found for this company on Apollo.");
-        }
+
+        const person = companyData.people[0];
+
+        // Step 2: Save contact to backend DB
+        const saveRes = await fetch(`${API_BASE}/leads/${leadId}/enrich`, {
+          method:"POST",
+          headers: { "Content-Type":"application/json" },
+          body: JSON.stringify({ contact: person }),
+        });
+        const saveText = await saveRes.text();
+        let saveData;
+        try { saveData = JSON.parse(saveText); } catch { alert(`Save error: ${saveText.slice(0,200)}`); setEnrich(null); return; }
+        if (!saveRes.ok) { alert(`Save failed: ${saveData.error}`); setEnrich(null); return; }
+
+        // Update UI immediately
+        setLeads(ls => ls.map(l => l.id !== leadId ? l : {
+          ...l,
+          first_name: person.name?.split(" ")[0],
+          last_name: person.name?.split(" ").slice(1).join(" "),
+          contact_title: person.title || "Decision Maker",
+          contact_email: person.email,
+          email_verified: !!person.email,
+          score: person.email ? Math.max(l.score, 4) : l.score,
+          status: "queued",
+        }));
+        alert(`✅ Found: ${person.name} (${person.title || "Decision Maker"})${person.email ? " · " + person.email : " · No email"}`);
         await loadData();
       } catch(err) {
         alert(`Enrich error: ${err.message}`);
