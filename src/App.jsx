@@ -377,55 +377,36 @@ function ApolloView({ apolloKey, setApolloKey, leads }) {
   const [error, setError]      = useState("");
   const [copied, setCopied]    = useState(null);
 
-  const headers = { "Content-Type":"application/json", "Cache-Control":"no-cache", "x-api-key": apolloKey };
+  const proxyHeaders = { "Content-Type":"application/json", "x-apollo-key": apolloKey };
 
-  // Search person by name + optional domain OR company name
+  // Search person via backend proxy (avoids CORS)
   const searchPerson = async () => {
     const body = { first_name:q.firstName, last_name:q.lastName };
     if (q.domain) body.domain = q.domain;
     if (q.companyName && !q.domain) body.organization_name = q.companyName;
-    const res = await fetch("https://api.apollo.io/v1/people/match", { method:"POST", headers, body:JSON.stringify(body) });
+    const res = await fetch(`${API_BASE}/apollo/person`, { method:"POST", headers:proxyHeaders, body:JSON.stringify(body) });
     const data = await res.json();
     if (data.person) {
       const p = data.person;
       return [{ name:`${p.first_name} ${p.last_name}`, title:p.title||"—", email:p.email, linkedin:p.linkedin_url, verified:!!p.email, company:p.organization?.name||q.companyName, domain:p.organization?.website_url }];
     }
-    throw new Error(data.message || "No person found");
+    if (!res.ok) throw new Error(data.error || "No person found");
+    throw new Error("No person found");
   };
 
-  // Search company by name → get people at that org
+  // Search company via backend proxy (avoids CORS)
   const searchCompany = async () => {
-    // Step 1: find org
-    const orgRes = await fetch("https://api.apollo.io/v1/mixed_companies/search", {
-      method:"POST", headers,
-      body: JSON.stringify({ q_organization_name: q.companyName, page:1, per_page:1 }),
+    const res = await fetch(`${API_BASE}/apollo/company`, {
+      method:"POST", headers:proxyHeaders,
+      body: JSON.stringify({ company_name: q.companyName }),
     });
-    const orgData = await orgRes.json();
-    const org = orgData.organizations?.[0];
-    if (!org) throw new Error(`Company "${q.companyName}" not found on Apollo`);
-
-    // Step 2: find decision makers at that org
-    const peopleRes = await fetch("https://api.apollo.io/v1/mixed_people/search", {
-      method:"POST", headers,
-      body: JSON.stringify({
-        organization_ids: [org.id],
-        person_titles: ["founder","co-founder","ceo","cto","chief executive","chief technology","head of engineering","vp engineering"],
-        page:1, per_page:5,
-      }),
-    });
-    const peopleData = await peopleRes.json();
-    const people = peopleData.people || [];
-    if (!people.length) throw new Error(`No decision makers found at "${q.companyName}"`);
-
-    return people.map(p => ({
-      name:`${p.first_name} ${p.last_name}`,
-      title: p.title||"—",
-      email: p.email,
-      linkedin: p.linkedin_url,
-      verified: !!p.email,
-      company: org.name,
-      domain: org.website_url,
-      employees: org.estimated_num_employees,
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Company not found");
+    return data.people.map(p => ({
+      name: p.name, title: p.title, email: p.email,
+      linkedin: p.linkedin, verified: p.verified,
+      company: data.org.name, domain: data.org.domain,
+      employees: data.org.employees,
     }));
   };
 
