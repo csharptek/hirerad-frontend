@@ -494,7 +494,7 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
             <div><StatusBadge status={lead.status} /></div>
             <div>
               {!lead.contact_email && (
-                <Btn size="sm" variant="outline" onClick={()=>onEnrich(lead.id)} disabled={enriching===lead.id}>
+                <Btn size="sm" variant="outline" onClick={()=>onEnrich(lead.id, lead.company_name)} disabled={enriching===lead.id}>
                   {enriching===lead.id ? <Spinner size={11}/> : "Enrich"}
                 </Btn>
               )}
@@ -937,7 +937,7 @@ export default function App() {
     } catch {}
   };
 
-  const handleEnrich = useCallback(async (leadId) => {
+  const handleEnrich = useCallback(async (leadId, companyName) => {
     setEnrich(leadId);
     if (backendOk) {
       try {
@@ -947,9 +947,8 @@ export default function App() {
           setEnrich(null);
           return;
         }
-        // Step 1: Use /api/apollo/company proxy (same working endpoint as Apollo tab)
-        const lead = leads.find(l => l.id === leadId);
-        if (!lead) { alert("Lead not found"); setEnrich(null); return; }
+        if (!companyName) { alert("Company name missing"); setEnrich(null); return; }
+        const lead = { id: leadId, company_name: companyName };
 
         const companyRes = await fetch(`${API_BASE}/apollo/company`, {
           method:"POST",
