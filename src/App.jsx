@@ -420,6 +420,7 @@ function ScraperView({ backendOk, onLeadsRefresh, settings }) {
 function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
   const [filter, setFilter] = useState("all");
   const [clearing, setClearing] = useState(false);
+  const [enrichingAll, setEnrichingAll] = useState(false);
   const filtered = filter==="all" ? leads : filter==="qualified" ? leads.filter(l=>l.score>=2) : leads.filter(l=>l.status===filter);
 
   const clearDatabase = async () => {
@@ -434,6 +435,17 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
     setClearing(false);
   };
 
+  const enrichAll = async () => {
+    const unenriched = leads.filter(l => !l.contact_email && l.score >= 2);
+    if (!unenriched.length) { alert("No unenriched leads found."); return; }
+    setEnrichingAll(true);
+    for (const lead of unenriched) {
+      await onEnrich(lead.id, lead.company_name);
+      await new Promise(r => setTimeout(r, 500)); // small delay between calls
+    }
+    setEnrichingAll(false);
+  };
+
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }} className="slide-in">
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:12 }}>
@@ -441,11 +453,18 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
           <h2 style={{ fontSize:22, fontWeight:800 }}>Lead Pipeline</h2>
           <p style={{ color:"var(--muted)", fontSize:13, marginTop:4 }}>{leads.length} total · {leads.filter(l=>l.score>=2).length} qualified</p>
         </div>
-        {backendOk && (
-          <Btn variant="danger" size="sm" onClick={clearDatabase} disabled={clearing}>
-            {clearing ? <><Spinner size={12}/>Clearing...</> : "🗑 Clear Database"}
-          </Btn>
-        )}
+        <div style={{ display:"flex", gap:8 }}>
+          {backendOk && (
+            <Btn variant="outline" size="sm" onClick={enrichAll} disabled={enrichingAll || !!enriching}>
+              {enrichingAll ? <><Spinner size={12}/>Enriching...</> : "⚡ Enrich All"}
+            </Btn>
+          )}
+          {backendOk && (
+            <Btn variant="danger" size="sm" onClick={clearDatabase} disabled={clearing}>
+              {clearing ? <><Spinner size={12}/>Clearing...</> : "🗑 Clear Database"}
+            </Btn>
+          )}
+        </div>
       </div>
 
       <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
@@ -942,39 +961,33 @@ export default function App() {
     if (backendOk) {
       try {
         const apolloKey = LS.get("hr_apollo");
-        if (!apolloKey) {
-          alert("Add your Apollo.io API key in Settings first!");
-          setEnrich(null);
-          return;
-        }
-        if (!companyName) { alert("Company name missing"); setEnrich(null); return; }
-        const lead = { id: leadId, company_name: companyName };
+        if (!apolloKey) { alert("Add your Apollo.io API key in Settings first!"); setEnrich(null); return; }
+        if (!companyName) { setEnrich(null); return; }
 
         const companyRes = await fetch(`${API_BASE}/apollo/company`, {
           method:"POST",
           headers: { "Content-Type":"application/json", "x-apollo-key": apolloKey },
-          body: JSON.stringify({ company_name: lead.company_name }),
+          body: JSON.stringify({ company_name: companyName }),
         });
         const companyData = await companyRes.json();
 
         if (!companyRes.ok || !companyData.people?.length) {
-          alert(`No decision maker found for "${lead.company_name}" on Apollo`);
+          // Silently mark as no contact found - don't alert for every miss
+          setLeads(ls => ls.map(l => l.id !== leadId ? l : { ...l, status:"pending" }));
           setEnrich(null);
           return;
         }
 
         const person = companyData.people[0];
 
-        // Step 2: Save contact to backend DB
+        // Save to backend DB
         const saveRes = await fetch(`${API_BASE}/leads/${leadId}/enrich`, {
           method:"POST",
           headers: { "Content-Type":"application/json" },
           body: JSON.stringify({ contact: person }),
         });
-        const saveText = await saveRes.text();
-        let saveData;
-        try { saveData = JSON.parse(saveText); } catch { alert(`Save error: ${saveText.slice(0,200)}`); setEnrich(null); return; }
-        if (!saveRes.ok) { alert(`Save failed: ${saveData.error}`); setEnrich(null); return; }
+        const saveData = await saveRes.json().catch(() => ({}));
+        if (!saveRes.ok) { setEnrich(null); return; }
 
         // Update UI immediately
         setLeads(ls => ls.map(l => l.id !== leadId ? l : {
@@ -987,10 +1000,8 @@ export default function App() {
           score: person.email ? Math.max(l.score, 4) : l.score,
           status: "queued",
         }));
-        alert(`✅ Found: ${person.name} (${person.title || "Decision Maker"})${person.email ? " · " + person.email : " · No email"}`);
         await loadData();
       } catch(err) {
-        alert(`Enrich error: ${err.message}`);
         console.error("Enrich failed:", err.message);
       }
     } else {
