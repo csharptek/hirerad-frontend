@@ -947,14 +947,20 @@ export default function App() {
           setEnrich(null);
           return;
         }
-        await apiFetch(`/leads/${leadId}/enrich`, {
+        const res = await fetch(`${API_BASE}/leads/${leadId}/enrich`, {
           method:"POST",
           headers: { "Content-Type":"application/json", "x-apollo-key": apolloKey },
         });
+        const data = await res.json();
+        if (!res.ok) {
+          alert(`Enrich failed: ${data.error}`);
+          setEnrich(null);
+          return;
+        }
         await loadData();
       } catch(err) {
+        alert(`Enrich error: ${err.message}`);
         console.error("Enrich failed:", err.message);
-        fallbackEnrich(leadId);
       }
     } else {
       await new Promise(r=>setTimeout(r,1500));
