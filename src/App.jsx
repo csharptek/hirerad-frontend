@@ -951,7 +951,13 @@ export default function App() {
           method:"POST",
           headers: { "Content-Type":"application/json", "x-apollo-key": apolloKey },
         });
-        const data = await res.json();
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { 
+          alert(`Server error: ${text.slice(0,200)}`);
+          setEnrich(null);
+          return;
+        }
         if (!res.ok) {
           alert(`Enrich failed: ${data.error}`);
           setEnrich(null);
