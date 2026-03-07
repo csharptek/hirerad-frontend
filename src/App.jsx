@@ -963,6 +963,23 @@ export default function App() {
           setEnrich(null);
           return;
         }
+        if (data.success && data.contact) {
+          const c = data.contact;
+          // Update lead locally immediately without waiting for reload
+          setLeads(ls => ls.map(l => l.id !== leadId ? l : {
+            ...l,
+            first_name: c.first_name,
+            last_name: c.last_name,
+            contact_title: c.title || "Decision Maker",
+            contact_email: c.email,
+            email_verified: !!c.email,
+            score: c.email ? Math.max(l.score, 4) : l.score,
+            status: "queued",
+          }));
+          alert(`✅ Found: ${c.first_name} ${c.last_name} (${c.title || "Decision Maker"})${c.email ? " · " + c.email : " · No email found"}`);
+        } else {
+          alert("No decision maker found for this company on Apollo.");
+        }
         await loadData();
       } catch(err) {
         alert(`Enrich error: ${err.message}`);
