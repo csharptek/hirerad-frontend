@@ -940,8 +940,22 @@ export default function App() {
   const handleEnrich = useCallback(async (leadId) => {
     setEnrich(leadId);
     if (backendOk) {
-      try { await apiFetch(`/leads/${leadId}/enrich`, { method:"POST" }); await loadData(); }
-      catch { fallbackEnrich(leadId); }
+      try {
+        const apolloKey = LS.get("hr_apollo");
+        if (!apolloKey) {
+          alert("Add your Apollo.io API key in Settings first!");
+          setEnrich(null);
+          return;
+        }
+        await apiFetch(`/leads/${leadId}/enrich`, {
+          method:"POST",
+          headers: { "Content-Type":"application/json", "x-apollo-key": apolloKey },
+        });
+        await loadData();
+      } catch(err) {
+        console.error("Enrich failed:", err.message);
+        fallbackEnrich(leadId);
+      }
     } else {
       await new Promise(r=>setTimeout(r,1500));
       fallbackEnrich(leadId);
