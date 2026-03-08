@@ -567,6 +567,12 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
               <div style={{ fontWeight:700, fontSize:13 }}>{lead.company_name}</div>
               <div style={{ color:"var(--muted)", fontSize:11, marginTop:2 }}>
                 {lead.job_title} · {lead.posted_at ? `${Math.floor((Date.now()-new Date(lead.posted_at))/864e5)}d ago` : "—"}
+                {lead.job_url && (
+                  <a href={lead.job_url} target="_blank" rel="noopener noreferrer" title="View job description on LinkedIn" style={{
+                    marginLeft:6, fontSize:10, color:"var(--accent)", textDecoration:"none",
+                    background:"#dbeafe", borderRadius:4, padding:"1px 5px", fontWeight:600,
+                  }}>JD ↗</a>
+                )}
               </div>
             </div>
             <div style={{ fontSize:11 }}>
