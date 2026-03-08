@@ -42,20 +42,20 @@ async function apiFetch(path, opts = {}) {
 }
 
 async function callClaude(systemPrompt, userPrompt) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }],
-    }),
-  });
-  const data = await res.json();
-  const text = data.content?.find(b => b.type === "text")?.text || "{}";
-  try { return JSON.parse(text.replace(/```json|```/g, "").trim()); }
-  catch { return { subject: "Personalized outreach", body: text }; }
+  // Route through our backend to avoid CORS + no API key needed in browser
+  try {
+    const res = await fetch(`${API_BASE}/generate-email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ systemPrompt, userPrompt }),
+    });
+    if (!res.ok) throw new Error("Backend email generation failed");
+    const data = await res.json();
+    return data;
+  } catch(err) {
+    console.error("callClaude error:", err.message);
+    return { subject: "Quick question about your hiring", body: "Hi {{first_name}},\n\nI noticed you\'re hiring at {{company}} and wanted to reach out...\n\nWould love to connect!" };
+  }
 }
 
 /* ─── Mock data ──────────────────────────────────────────────────────────── */
@@ -280,7 +280,9 @@ function ScraperView({ backendOk, onLeadsRefresh, settings }) {
           if (["complete","failed"].includes(status.status)) {
             done = true;
             if (status.status==="complete") {
-              addLog(`✅ Complete! ${status.jobs_found} jobs, ${status.leads_qualified} leads.`, "success");
+              const jobsMsg = status.jobs_found > 0 ? `${status.jobs_found} jobs scraped` : "Scrape finished";
+              const leadsMsg = status.leads_qualified > 0 ? `, ${status.leads_qualified} leads qualified (score ≥ 2)` : " — no leads matched filters (try broader settings)";
+              addLog(`✅ ${jobsMsg}${leadsMsg}`, "success");
               onLeadsRefresh();
             } else {
               addLog(`❌ Failed: ${status.error_msg}`, "error");
@@ -421,7 +423,45 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
   const [filter, setFilter] = useState("all");
   const [clearing, setClearing] = useState(false);
   const [enrichingAll, setEnrichingAll] = useState(false);
-  const filtered = filter==="all" ? leads : filter==="qualified" ? leads.filter(l=>l.score>=2) : leads.filter(l=>l.status===filter);
+  const [sortBy, setSortBy] = useState("date");
+  const [sortDir, setSortDir] = useState("desc");
+  const [dateFilter, setDateFilter] = useState("all");
+  const [showAll, setShowAll] = useState(false);
+
+  const toggleSort = (col) => {
+    if (sortBy === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortBy(col); setSortDir("desc"); }
+  };
+
+  const filtered = leads
+    .filter(l => {
+      if (filter === "qualified") return l.score >= 2;
+      if (filter === "enriched") return !!l.contact_email;
+      if (filter === "no_contact") return !l.contact_email;
+      if (["queued","pending","in_campaign","low-score"].includes(filter)) return l.status === filter;
+      return true;
+    })
+    .filter(l => {
+      if (dateFilter === "all") return true;
+      const days = l.posted_at ? Math.floor((Date.now() - new Date(l.posted_at)) / 864e5) : 999;
+      if (dateFilter === "today") return days === 0;
+      if (dateFilter === "3d") return days <= 3;
+      if (dateFilter === "7d") return days <= 7;
+      if (dateFilter === "14d") return days <= 14;
+      return true;
+    })
+    .sort((a, b) => {
+      let av, bv;
+      if (sortBy === "date") { av = new Date(a.posted_at||0); bv = new Date(b.posted_at||0); }
+      else if (sortBy === "score") { av = a.score; bv = b.score; }
+      else if (sortBy === "company") { av = a.company_name?.toLowerCase(); bv = b.company_name?.toLowerCase(); }
+      else { av = a[sortBy]; bv = b[sortBy]; }
+      if (av < bv) return sortDir === "asc" ? -1 : 1;
+      if (av > bv) return sortDir === "asc" ? 1 : -1;
+      return 0;
+    });
+
+  const displayed = showAll ? filtered : filtered.slice(0, 50);
 
   const clearDatabase = async () => {
     if (!window.confirm("Clear ALL leads from the database? This cannot be undone.")) return;
@@ -467,16 +507,46 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
         </div>
       </div>
 
-      <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-        {["all","qualified","queued","pending","in_campaign","low-score"].map(f => (
-          <button key={f} onClick={() => setFilter(f)} style={{
-            background:filter===f ? "var(--accent)" : "var(--surface)",
-            color:filter===f ? "#fff" : "var(--muted)",
-            border:`1px solid ${filter===f?"var(--accent)":"var(--border)"}`,
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+        {[
+          { key:"all", label:`All (${leads.length})` },
+          { key:"qualified", label:`Qualified (${leads.filter(l=>l.score>=2).length})` },
+          { key:"enriched", label:`Enriched (${leads.filter(l=>l.contact_email).length})` },
+          { key:"no_contact", label:`No Contact (${leads.filter(l=>!l.contact_email).length})` },
+          { key:"queued", label:"Queued" },
+          { key:"pending", label:"Pending" },
+          { key:"in_campaign", label:"In Campaign" },
+        ].map(f => (
+          <button key={f.key} onClick={() => setFilter(f.key)} style={{
+            background:filter===f.key ? "var(--accent)" : "var(--surface)",
+            color:filter===f.key ? "#fff" : "var(--muted)",
+            border:`1px solid ${filter===f.key?"var(--accent)":"var(--border)"}`,
             borderRadius:20, padding:"5px 14px", cursor:"pointer",
             fontSize:12, fontFamily:"var(--font)", fontWeight:600,
             boxShadow:"var(--shadow)", transition:"all .15s",
-          }}>{f==="all" ? `All (${leads.length})` : f.replace(/-/g," ").replace(/_/g," ")}</button>
+          }}>{f.label}</button>
+        ))}
+      </div>
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+        <span style={{ fontSize:11, color:"var(--muted)", fontWeight:600 }}>POSTED:</span>
+        {[{k:"all",l:"Any time"},{k:"today",l:"Today"},{k:"3d",l:"≤ 3 days"},{k:"7d",l:"≤ 7 days"},{k:"14d",l:"≤ 14 days"}].map(d => (
+          <button key={d.k} onClick={() => setDateFilter(d.k)} style={{
+            background:dateFilter===d.k?"#7c3aed":"var(--surface)",
+            color:dateFilter===d.k?"#fff":"var(--muted)",
+            border:`1px solid ${dateFilter===d.k?"#7c3aed":"var(--border)"}`,
+            borderRadius:20, padding:"4px 12px", cursor:"pointer",
+            fontSize:11, fontFamily:"var(--font)", fontWeight:600, transition:"all .15s",
+          }}>{d.l}</button>
+        ))}
+        <span style={{ fontSize:11, color:"var(--muted)", fontWeight:600, marginLeft:8 }}>SORT:</span>
+        {[{k:"date",l:"Date"},{k:"score",l:"Score"},{k:"company",l:"Company"}].map(s => (
+          <button key={s.k} onClick={() => toggleSort(s.k)} style={{
+            background:sortBy===s.k?"#d97706":"var(--surface)",
+            color:sortBy===s.k?"#fff":"var(--muted)",
+            border:`1px solid ${sortBy===s.k?"#d97706":"var(--border)"}`,
+            borderRadius:20, padding:"4px 12px", cursor:"pointer",
+            fontSize:11, fontFamily:"var(--font)", fontWeight:600, transition:"all .15s",
+          }}>{s.l} {sortBy===s.k?(sortDir==="asc"?"↑":"↓"):""}</button>
         ))}
       </div>
 
@@ -484,10 +554,10 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
         <div style={{ display:"grid", gridTemplateColumns:"1.2fr 160px 110px 90px 110px 80px", padding:"10px 16px", borderBottom:"1px solid var(--border)", fontSize:10, textTransform:"uppercase", letterSpacing:.8, color:"var(--muted)", fontWeight:700, background:"var(--surface2)" }}>
           <span>Company / Role</span><span>Contact</span><span>Industry</span><span>Score</span><span>Status</span><span>Action</span>
         </div>
-        {filtered.map((lead,i) => (
+        {displayed.map((lead,i) => (
           <div key={lead.id} style={{
             display:"grid", gridTemplateColumns:"1.2fr 160px 110px 90px 110px 80px",
-            padding:"12px 16px", borderBottom:i<filtered.length-1?"1px solid var(--border)":"none",
+            padding:"12px 16px", borderBottom:i<displayed.length-1?"1px solid var(--border)":"none",
             alignItems:"center", transition:"background .12s",
           }}
             onMouseEnter={e=>e.currentTarget.style.background="var(--surface2)"}
@@ -504,6 +574,7 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
                 <>
                   <div style={{ fontWeight:600 }}>{lead.first_name} {lead.last_name}</div>
                   <div style={{ color:"var(--muted)" }}>{lead.contact_title}</div>
+                  <div style={{ color:"var(--accent)", fontSize:10, marginTop:2, wordBreak:"break-all" }}>{lead.contact_email}</div>
                   {lead.email_verified && <Badge variant="success">✓ verified</Badge>}
                 </>
               ) : <span style={{ color:"var(--danger)", fontSize:11 }}>No contact</span>}
@@ -521,6 +592,14 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
           </div>
         ))}
         {filtered.length===0 && <div style={{ padding:"40px 16px", textAlign:"center", color:"var(--muted)" }}>No leads matching this filter</div>}
+        {filtered.length > 50 && (
+          <div style={{ padding:"12px 16px", textAlign:"center", borderTop:"1px solid var(--border)", background:"var(--surface2)" }}>
+            <span style={{ fontSize:12, color:"var(--muted)" }}>Showing {showAll ? filtered.length : 50} of {filtered.length} leads · </span>
+            <button onClick={() => setShowAll(s=>!s)} style={{ fontSize:12, color:"var(--accent)", background:"none", border:"none", cursor:"pointer", fontWeight:600 }}>
+              {showAll ? "Show less" : `Show all ${filtered.length}`}
+            </button>
+          </div>
+        )}
       </Card>
     </div>
   );
@@ -972,8 +1051,7 @@ export default function App() {
         const companyData = await companyRes.json();
 
         if (!companyRes.ok || !companyData.people?.length) {
-          // Silently mark as no contact found - don't alert for every miss
-          setLeads(ls => ls.map(l => l.id !== leadId ? l : { ...l, status:"pending" }));
+          // No contact found - leave lead unchanged
           setEnrich(null);
           return;
         }
