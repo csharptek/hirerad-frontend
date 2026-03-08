@@ -1097,10 +1097,13 @@ function SettingsView({ settings, onSave }) {
   const [deploying, setDeploying] = useState(false);
   const [deployLog, setDeployLog] = useState([]);
   const [deployResult, setDeployResult] = useState(null);
+  // Track what's actually persisted in localStorage (for status indicator)
+  const [savedUrl, setSavedUrl] = useState(LS.get("hr_azure_url", ""));
 
   const save = () => {
     onSave(local);
     setSaved(true);
+    setSavedUrl(local.azureFunctionUrl || "");
     setTimeout(()=>setSaved(false), 2000);
   };
 
@@ -1229,6 +1232,18 @@ function SettingsView({ settings, onSave }) {
             value={local.deploySecret||""}
             onChange={e=>setLocal(p=>({...p,deploySecret:e.target.value}))}
           />
+        </div>
+
+        {/* Save Deploy Settings button */}
+        <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:20, paddingBottom:20, borderBottom:"1px solid var(--border)" }}>
+          <Btn variant="outline" onClick={save} style={{ minWidth:180 }}>
+            {saved ? "✅ Saved!" : "💾 Save Deploy Settings"}
+          </Btn>
+          <div style={{ fontSize:12 }}>
+            {savedUrl
+              ? <span style={{ color:"#16a34a", fontWeight:600 }}>✓ URL saved · persists on reload</span>
+              : <span style={{ color:"var(--danger)" }}>⚠ Enter Azure Function URL above then save</span>}
+          </div>
         </div>
 
         <PendingDeployStatus />
