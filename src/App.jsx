@@ -42,20 +42,14 @@ async function apiFetch(path, opts = {}) {
 }
 
 async function callClaude(systemPrompt, userPrompt) {
-  // Route through our backend to avoid CORS + no API key needed in browser
-  try {
-    const res = await fetch(`${API_BASE}/generate-email`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ systemPrompt, userPrompt }),
-    });
-    if (!res.ok) throw new Error("Backend email generation failed");
-    const data = await res.json();
-    return data;
-  } catch(err) {
-    console.error("callClaude error:", err.message);
-    return { subject: "Quick question about your hiring", body: "Hi {{first_name}},\n\nI noticed you\'re hiring at {{company}} and wanted to reach out...\n\nWould love to connect!" };
-  }
+  const res = await fetch(`${API_BASE}/generate-email`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ systemPrompt, userPrompt }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Email generation failed");
+  return data;
 }
 
 /* ─── Mock data ──────────────────────────────────────────────────────────── */
@@ -148,6 +142,32 @@ const Btn = ({ children, onClick, disabled, variant="primary", size="md", ...res
 const Label = ({ children }) => (
   <div style={{ fontSize:11, fontWeight:600, color:"var(--muted)", textTransform:"uppercase", letterSpacing:.8, marginBottom:6 }}>{children}</div>
 );
+
+// Shows pending files Claude has pre-loaded for deployment
+const PendingDeployStatus = () => {
+  const [pending, setPending] = React.useState([]);
+  React.useEffect(() => {
+    const check = () => setPending(window.__HIRERAD_PENDING_DEPLOY__ || []);
+    check();
+    const t = setInterval(check, 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!pending.length) return (
+    <div style={{ background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:8, padding:"10px 14px", fontSize:12, color:"var(--muted)", marginBottom:12 }}>
+      ⏳ No updates pending — Claude will pre-load files here before asking you to deploy
+    </div>
+  );
+  return (
+    <div style={{ background:"#dcfce7", border:"1px solid #16a34a40", borderRadius:8, padding:"10px 14px", marginBottom:12 }}>
+      <div style={{ fontSize:12, fontWeight:700, color:"#16a34a", marginBottom:6 }}>✅ {pending.length} file(s) ready to deploy:</div>
+      {pending.map((f,i) => (
+        <div key={i} style={{ fontSize:11, fontFamily:"var(--mono)", color:"#166534" }}>
+          📦 {f.repo} → {f.path}
+        </div>
+      ))}
+    </div>
+  );
+};
 
 const Card = ({ children, style }) => (
   <div style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:12, padding:24, boxShadow:"var(--shadow)", ...style }}>
@@ -804,15 +824,49 @@ function CampaignView({ leads, backendOk, settings }) {
 
   const qualified = leads.filter(l => l.score>=2 && l.contact_email);
 
+  const [genError, setGenError] = useState(null);
+
   const generateEmail = async () => {
     if (!selected) return;
-    setGenerating(true); setGenEmail(null);
+    setGenerating(true); setGenEmail(null); setGenError(null);
     const stepLabels = ["Initial Outreach","Value Follow-up","Social Proof","Final Nudge"];
-    const result = await callClaude(
-      "You are an expert B2B outbound sales copywriter for a dev talent firm. Generate a short, highly personalized cold email. Respond ONLY with valid JSON: {\"subject\":\"...\",\"body\":\"...\"}. No markdown.",
-      `Write step ${step} (${stepLabels[step-1]}) of a 4-touch cold outreach for:\nContact: ${selected.first_name} ${selected.last_name}, ${selected.contact_title} at ${selected.company_name}\nIndustry: ${selected.industry} | Hiring: ${selected.job_title}\nWe provide pre-vetted offshore developers to US startups — fast (2 weeks) at 60% cost savings. Under 90 words, casual but credible.`
-    );
-    setGenEmail(result); setGenerating(false);
+    const stepInstructions = [
+      "This is the FIRST email — cold intro. Reference their specific job posting. Be ultra-brief, curious, and end with one soft question. No pitching yet.",
+      "This is a FOLLOW-UP (day 3). They haven\'t replied. Reference that you reached out before. Add one specific value point about 60% cost savings + 2-week placement. End with a question.",
+      "This is a SOCIAL PROOF email (day 6). Mention that similar startups in their industry have used your service. Keep it short. One line of proof, one ask.",
+      "This is the FINAL email (day 10). Keep it very short — 3 sentences max. Acknowledge it might not be the right time. Leave the door open. No pressure.",
+    ];
+    const daysPosted = selected.posted_at ? Math.floor((Date.now()-new Date(selected.posted_at))/864e5) : null;
+    const urgency = daysPosted !== null && daysPosted <= 3 ? "They posted this role very recently (${daysPosted}d ago) — they are actively hiring RIGHT NOW." : "";
+    try {
+      const result = await callClaude(
+        `You are an expert B2B cold email copywriter. You write short, human, personalized cold emails for a dev staffing firm that places pre-vetted offshore software engineers with US startups — 60% cheaper than local hires, placed in under 2 weeks.
+
+Rules:
+- Sound like a real person, not a robot or marketer
+- Never use buzzwords like "synergy", "leverage", "circle back"
+- Max 80 words for body
+- Use their first name, company name, and job title naturally
+- Respond ONLY with valid JSON: {"subject":"...","body":"..."}
+- No markdown, no code blocks, just raw JSON`,
+        `Write step ${step} of 4 (${stepLabels[step-1]}) for this lead:
+
+Name: ${selected.first_name} ${selected.last_name}
+Title: ${selected.contact_title}
+Company: ${selected.company_name}
+Industry: ${selected.industry || "Tech"}
+Currently hiring for: ${selected.job_title}
+${urgency}
+
+Step instruction: ${stepInstructions[step-1]}
+
+Value prop: We place pre-vetted offshore devs with US startups in under 2 weeks at 60% the cost of local engineers. No long-term contracts.`
+      );
+      setGenEmail(result);
+    } catch(err) {
+      setGenError(err.message);
+    }
+    setGenerating(false);
   };
 
   const launchCampaign = async () => {
@@ -902,6 +956,7 @@ function CampaignView({ leads, backendOk, settings }) {
           {!selected && <div style={{ textAlign:"center", padding:"40px 20px", color:"var(--muted)" }}><div style={{ fontSize:32, marginBottom:8 }}>👈</div>Select a lead from the left</div>}
           {selected && !genEmail && !generating && <div style={{ textAlign:"center", padding:"40px 20px", color:"var(--muted)" }}><div style={{ fontSize:32, marginBottom:8 }}>✨</div>Click Generate to craft a personalized email</div>}
           {generating && <div style={{ textAlign:"center", padding:"40px 20px" }}><Spinner size={28}/><div style={{ color:"var(--muted)", marginTop:12 }}>Claude is writing...</div></div>}
+          {genError && !generating && <div style={{ background:"#fef2f2", border:"1px solid #fecaca", borderRadius:8, padding:"12px 16px", fontSize:13, color:"#dc2626" }}>❌ {genError}</div>}
           {genEmail && !generating && (
             <div style={{ animation:"fadeIn .3s ease" }}>
               <div style={{ marginBottom:12 }}>
@@ -928,11 +983,65 @@ function CampaignView({ leads, backendOk, settings }) {
 function SettingsView({ settings, onSave }) {
   const [local, setLocal] = useState({ ...settings });
   const [saved, setSaved] = useState(false);
+  const [deploying, setDeploying] = useState(false);
+  const [deployLog, setDeployLog] = useState([]);
+  const [deployResult, setDeployResult] = useState(null);
 
   const save = () => {
     onSave(local);
     setSaved(true);
     setTimeout(()=>setSaved(false), 2000);
+  };
+
+  const deployToGitHub = async () => {
+    const azureUrl = local.azureFunctionUrl;
+    const deploySecret = local.deploySecret;
+    if (!azureUrl) { alert("Add your Azure Function URL in the Deploy section below first"); return; }
+
+    // Check if Claude has pre-loaded new file content
+    const pendingFiles = window.__HIRERAD_PENDING_DEPLOY__ || [];
+    if (!pendingFiles.length) {
+      alert("No updates pending. Claude will pre-load new files before asking you to deploy.");
+      return;
+    }
+
+    setDeploying(true);
+    setDeployLog([]);
+    setDeployResult(null);
+    const log = (msg, type="default") => setDeployLog(l => [...l, { msg, type, time: new Date().toLocaleTimeString() }]);
+
+    log(`🚀 Deploying ${pendingFiles.length} file(s) to GitHub...`, "accent");
+    pendingFiles.forEach(f => log(`📦 ${f.repo} → ${f.path}`, "default"));
+
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (deploySecret) headers["x-deploy-secret"] = deploySecret;
+
+      const res = await fetch(azureUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ files: pendingFiles }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        data.results.forEach(r => log(`✅ ${r.path} committed (${r.commit})`, "success"));
+        log("🎉 Done! Vercel + Railway deploying in ~60s", "success");
+        setDeployResult({ success: true, results: data.results });
+        window.__HIRERAD_PENDING_DEPLOY__ = []; // clear after success
+      } else {
+        data.results?.forEach(r => {
+          if (r.status === "success") log(`✅ ${r.path} deployed`, "success");
+          else log(`❌ ${r.path}: ${r.error}`, "error");
+        });
+        setDeployResult({ success: false });
+      }
+    } catch(err) {
+      log(`❌ Deploy failed: ${err.message}`, "error");
+      setDeployResult({ success: false });
+    }
+    setDeploying(false);
   };
 
   const KeyField = ({ label, hint, field, type="password" }) => (
@@ -987,6 +1096,68 @@ function SettingsView({ settings, onSave }) {
       </Card>
 
       <Card>
+        <div style={{ fontWeight:700, fontSize:15, marginBottom:4 }}>⚙️ Azure Auto-Deploy</div>
+        <p style={{ color:"var(--muted)", fontSize:12, marginBottom:16 }}>
+          Push code changes directly to GitHub → triggers Vercel & Railway auto-deploy
+        </p>
+
+        <div style={{ marginBottom:12 }}>
+          <Label>Azure Function URL</Label>
+          <Input
+            type="text"
+            placeholder="https://your-function.azurewebsites.net/api/deploy"
+            value={local.azureFunctionUrl||""}
+            onChange={e=>setLocal(p=>({...p,azureFunctionUrl:e.target.value}))}
+          />
+        </div>
+        <div style={{ marginBottom:16 }}>
+          <Label>Deploy Secret (optional)</Label>
+          <Input
+            type="password"
+            placeholder="Your x-deploy-secret value"
+            value={local.deploySecret||""}
+            onChange={e=>setLocal(p=>({...p,deploySecret:e.target.value}))}
+          />
+        </div>
+
+        <PendingDeployStatus />
+
+        <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:16 }}>
+          <Btn onClick={deployToGitHub} disabled={deploying||!local.azureFunctionUrl} variant="success" style={{ minWidth:180 }}>
+            {deploying
+              ? <><Spinner size={14}/>Deploying...</>
+              : "🚀 Deploy to GitHub"}
+          </Btn>
+          {deployResult && (
+            <span style={{ fontSize:12, fontWeight:700, color: deployResult.success ? "var(--accent3)" : "var(--danger)" }}>
+              {deployResult.success ? "✅ Deployed successfully!" : "❌ Deploy failed"}
+            </span>
+          )}
+        </div>
+
+        {deployLog.length > 0 && (
+          <div style={{ fontFamily:"var(--mono)", fontSize:11, lineHeight:2, background:"var(--surface2)", borderRadius:8, padding:12, maxHeight:200, overflowY:"auto" }}>
+            {deployLog.map((l,i) => (
+              <div key={i} style={{ color: l.type==="success"?"var(--accent3)":l.type==="error"?"var(--danger)":l.type==="accent"?"var(--accent)":l.type==="warn"?"var(--warn)":"var(--muted)" }}>
+                <span style={{ opacity:.4 }}>{l.time}</span>{"  "}{l.msg}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {deployResult?.results?.length > 0 && (
+          <div style={{ marginTop:12, display:"flex", flexDirection:"column", gap:6 }}>
+            {deployResult.results.map((r,i) => r.url && (
+              <a key={i} href={r.url} target="_blank" rel="noreferrer"
+                style={{ fontSize:11, color:"var(--accent)", fontFamily:"var(--mono)" }}>
+                🔗 {r.repo}/{r.path} @ {r.commit}
+              </a>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card>
         <div style={{ fontWeight:700, fontSize:15, marginBottom:12 }}>🚀 Backend Setup</div>
         <div style={{ fontFamily:"var(--mono)", fontSize:12, lineHeight:2, color:"var(--muted)", background:"var(--surface2)", borderRadius:8, padding:14 }}>
           {["cd hirerad-backend","npm install","cp env.example .env   # fill in your keys","npm run dev              # start API on :4000"].map((cmd,i)=>(
@@ -1008,15 +1179,19 @@ export default function App() {
 
   // Load API keys from localStorage
   const [settings, setSettings] = useState(() => ({
-    apolloKey:    LS.get("hr_apollo"),
-    apifyKey:     LS.get("hr_apify"),
-    instantlyKey: LS.get("hr_instantly"),
+    apolloKey:        LS.get("hr_apollo"),
+    apifyKey:         LS.get("hr_apify"),
+    instantlyKey:     LS.get("hr_instantly"),
+    azureFunctionUrl: LS.get("hr_azure_url"),
+    deploySecret:     LS.get("hr_deploy_secret"),
   }));
 
   const saveSettings = (s) => {
-    LS.set("hr_apollo",    s.apolloKey    || "");
-    LS.set("hr_apify",     s.apifyKey     || "");
-    LS.set("hr_instantly", s.instantlyKey || "");
+    LS.set("hr_apollo",    s.apolloKey         || "");
+    LS.set("hr_apify",     s.apifyKey          || "");
+    LS.set("hr_instantly", s.instantlyKey      || "");
+    LS.set("hr_azure_url", s.azureFunctionUrl  || "");
+    LS.set("hr_deploy_secret", s.deploySecret  || "");
     setSettings(s);
   };
 
