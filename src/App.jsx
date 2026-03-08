@@ -143,6 +143,32 @@ const Label = ({ children }) => (
   <div style={{ fontSize:11, fontWeight:600, color:"var(--muted)", textTransform:"uppercase", letterSpacing:.8, marginBottom:6 }}>{children}</div>
 );
 
+// Shows pending files Claude has pre-loaded for deployment
+const PendingDeployStatus = () => {
+  const [pending, setPending] = useState([]);
+  useEffect(() => {
+    const check = () => setPending(window.__HIRERAD_PENDING_DEPLOY__ || []);
+    check();
+    const t = setInterval(check, 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!pending.length) return (
+    <div style={{ background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:8, padding:"10px 14px", fontSize:12, color:"var(--muted)", marginBottom:12 }}>
+      ⏳ No updates pending — Claude will pre-load files here before asking you to deploy
+    </div>
+  );
+  return (
+    <div style={{ background:"#dcfce7", border:"1px solid #16a34a40", borderRadius:8, padding:"10px 14px", marginBottom:12 }}>
+      <div style={{ fontSize:12, fontWeight:700, color:"#16a34a", marginBottom:6 }}>✅ {pending.length} file(s) ready to deploy:</div>
+      {pending.map((f,i) => (
+        <div key={i} style={{ fontSize:11, fontFamily:"var(--mono)", color:"#166534" }}>
+          📦 {f.repo} → {f.path}
+        </div>
+      ))}
+    </div>
+  );
+};
+
 const Card = ({ children, style }) => (
   <div style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:12, padding:24, boxShadow:"var(--shadow)", ...style }}>
     {children}
@@ -414,13 +440,16 @@ function ScraperView({ backendOk, onLeadsRefresh, settings }) {
 
 /* ─── Leads View ─────────────────────────────────────────────────────────── */
 function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
-  const [filter, setFilter] = useState("all");
-  const [clearing, setClearing] = useState(false);
+  const [filter, setFilter]         = useState("all");
+  const [clearing, setClearing]     = useState(false);
   const [enrichingAll, setEnrichingAll] = useState(false);
-  const [sortBy, setSortBy] = useState("date");
-  const [sortDir, setSortDir] = useState("desc");
+  const [sortBy, setSortBy]         = useState("created");
+  const [sortDir, setSortDir]       = useState("desc");
   const [dateFilter, setDateFilter] = useState("all");
-  const [showAll, setShowAll] = useState(false);
+  const [showAll, setShowAll]       = useState(false);
+  const [selected, setSelected]     = useState(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
 
   const toggleSort = (col) => {
     if (sortBy === col) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -446,8 +475,9 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
     })
     .sort((a, b) => {
       let av, bv;
-      if (sortBy === "date") { av = new Date(a.posted_at||0); bv = new Date(b.posted_at||0); }
-      else if (sortBy === "score") { av = a.score; bv = b.score; }
+      if (sortBy === "date")    { av = new Date(a.posted_at||0);  bv = new Date(b.posted_at||0); }
+      else if (sortBy === "created") { av = new Date(a.created_at||a.id||0); bv = new Date(b.created_at||b.id||0); }
+      else if (sortBy === "score")   { av = a.score; bv = b.score; }
       else if (sortBy === "company") { av = a.company_name?.toLowerCase(); bv = b.company_name?.toLowerCase(); }
       else { av = a[sortBy]; bv = b[sortBy]; }
       if (av < bv) return sortDir === "asc" ? -1 : 1;
@@ -457,15 +487,53 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
 
   const displayed = showAll ? filtered : filtered.slice(0, 50);
 
+  // Selection helpers
+  const allDisplayedIds = displayed.map(l => l.id);
+  const allSelected = allDisplayedIds.length > 0 && allDisplayedIds.every(id => selected.has(id));
+  const someSelected = allDisplayedIds.some(id => selected.has(id));
+
+  const toggleSelect = (id) => {
+    setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  };
+  const toggleSelectAll = () => {
+    if (allSelected) setSelected(s => { const n = new Set(s); allDisplayedIds.forEach(id => n.delete(id)); return n; });
+    else setSelected(s => { const n = new Set(s); allDisplayedIds.forEach(id => n.add(id)); return n; });
+  };
+
+  // Delete single lead
+  const deleteLead = async (id) => {
+    if (!window.confirm("Delete this lead?")) return;
+    setDeletingId(id);
+    try {
+      await apiFetch(`/leads/${id}`, { method:"DELETE" });
+      onClearDb(); // refresh leads
+    } catch(err) { alert("Delete failed: " + err.message); }
+    setDeletingId(null);
+    setSelected(s => { const n = new Set(s); n.delete(id); return n; });
+  };
+
+  // Bulk delete selected
+  const bulkDelete = async () => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (!window.confirm(`Delete ${ids.length} selected lead(s)? This cannot be undone.`)) return;
+    setBulkDeleting(true);
+    try {
+      await apiFetch("/leads/bulk-delete", { method:"DELETE", body: JSON.stringify({ ids }) });
+      onClearDb();
+      setSelected(new Set());
+    } catch(err) { alert("Bulk delete failed: " + err.message); }
+    setBulkDeleting(false);
+  };
+
   const clearDatabase = async () => {
     if (!window.confirm("Clear ALL leads from the database? This cannot be undone.")) return;
     setClearing(true);
     try {
       await apiFetch("/leads/clear", { method:"DELETE" });
       onClearDb();
-    } catch(err) {
-      alert("Clear failed: " + err.message);
-    }
+      setSelected(new Set());
+    } catch(err) { alert("Clear failed: " + err.message); }
     setClearing(false);
   };
 
@@ -475,19 +543,38 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
     setEnrichingAll(true);
     for (const lead of unenriched) {
       await onEnrich(lead.id, lead.company_name);
-      await new Promise(r => setTimeout(r, 500)); // small delay between calls
+      await new Promise(r => setTimeout(r, 500));
     }
     setEnrichingAll(false);
   };
 
+  const SortBtn = ({ col, label }) => (
+    <button onClick={() => toggleSort(col)} style={{
+      background: sortBy===col ? "#d97706" : "var(--surface)",
+      color: sortBy===col ? "#fff" : "var(--muted)",
+      border: `1px solid ${sortBy===col?"#d97706":"var(--border)"}`,
+      borderRadius:20, padding:"4px 12px", cursor:"pointer",
+      fontSize:11, fontFamily:"var(--font)", fontWeight:600, transition:"all .15s",
+    }}>{label} {sortBy===col ? (sortDir==="asc"?"↑":"↓") : ""}</button>
+  );
+
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }} className="slide-in">
+      {/* Header */}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:12 }}>
         <div>
           <h2 style={{ fontSize:22, fontWeight:800 }}>Lead Pipeline</h2>
-          <p style={{ color:"var(--muted)", fontSize:13, marginTop:4 }}>{leads.length} total · {leads.filter(l=>l.score>=2).length} qualified</p>
+          <p style={{ color:"var(--muted)", fontSize:13, marginTop:4 }}>
+            {leads.length} total · {leads.filter(l=>l.score>=2).length} qualified
+            {selected.size > 0 && <span style={{ color:"var(--accent)", marginLeft:8, fontWeight:700 }}>· {selected.size} selected</span>}
+          </p>
         </div>
-        <div style={{ display:"flex", gap:8 }}>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+          {selected.size > 0 && backendOk && (
+            <Btn variant="danger" size="sm" onClick={bulkDelete} disabled={bulkDeleting}>
+              {bulkDeleting ? <><Spinner size={12}/>Deleting...</> : `🗑 Delete Selected (${selected.size})`}
+            </Btn>
+          )}
           {backendOk && (
             <Btn variant="outline" size="sm" onClick={enrichAll} disabled={enrichingAll || !!enriching}>
               {enrichingAll ? <><Spinner size={12}/>Enriching...</> : "⚡ Enrich All"}
@@ -501,19 +588,20 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
         </div>
       </div>
 
+      {/* Status filters */}
       <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
         {[
-          { key:"all", label:`All (${leads.length})` },
-          { key:"qualified", label:`Qualified (${leads.filter(l=>l.score>=2).length})` },
-          { key:"enriched", label:`Enriched (${leads.filter(l=>l.contact_email).length})` },
+          { key:"all",        label:`All (${leads.length})` },
+          { key:"qualified",  label:`Qualified (${leads.filter(l=>l.score>=2).length})` },
+          { key:"enriched",   label:`Enriched (${leads.filter(l=>l.contact_email).length})` },
           { key:"no_contact", label:`No Contact (${leads.filter(l=>!l.contact_email).length})` },
-          { key:"queued", label:"Queued" },
-          { key:"pending", label:"Pending" },
-          { key:"in_campaign", label:"In Campaign" },
+          { key:"queued",     label:"Queued" },
+          { key:"pending",    label:"Pending" },
+          { key:"in_campaign",label:"In Campaign" },
         ].map(f => (
           <button key={f.key} onClick={() => setFilter(f.key)} style={{
-            background:filter===f.key ? "var(--accent)" : "var(--surface)",
-            color:filter===f.key ? "#fff" : "var(--muted)",
+            background: filter===f.key ? "var(--accent)" : "var(--surface)",
+            color:      filter===f.key ? "#fff" : "var(--muted)",
             border:`1px solid ${filter===f.key?"var(--accent)":"var(--border)"}`,
             borderRadius:20, padding:"5px 14px", cursor:"pointer",
             fontSize:12, fontFamily:"var(--font)", fontWeight:600,
@@ -521,81 +609,130 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
           }}>{f.label}</button>
         ))}
       </div>
+
+      {/* Date + Sort filters */}
       <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
         <span style={{ fontSize:11, color:"var(--muted)", fontWeight:600 }}>POSTED:</span>
-        {[{k:"all",l:"Any time"},{k:"today",l:"Today"},{k:"3d",l:"≤ 3 days"},{k:"7d",l:"≤ 7 days"},{k:"14d",l:"≤ 14 days"}].map(d => (
+        {[{k:"all",l:"Any time"},{k:"today",l:"Today"},{k:"3d",l:"≤ 3d"},{k:"7d",l:"≤ 7d"},{k:"14d",l:"≤ 14d"}].map(d => (
           <button key={d.k} onClick={() => setDateFilter(d.k)} style={{
-            background:dateFilter===d.k?"#7c3aed":"var(--surface)",
-            color:dateFilter===d.k?"#fff":"var(--muted)",
+            background: dateFilter===d.k ? "#7c3aed" : "var(--surface)",
+            color:      dateFilter===d.k ? "#fff" : "var(--muted)",
             border:`1px solid ${dateFilter===d.k?"#7c3aed":"var(--border)"}`,
             borderRadius:20, padding:"4px 12px", cursor:"pointer",
             fontSize:11, fontFamily:"var(--font)", fontWeight:600, transition:"all .15s",
           }}>{d.l}</button>
         ))}
         <span style={{ fontSize:11, color:"var(--muted)", fontWeight:600, marginLeft:8 }}>SORT:</span>
-        {[{k:"date",l:"Date"},{k:"score",l:"Score"},{k:"company",l:"Company"}].map(s => (
-          <button key={s.k} onClick={() => toggleSort(s.k)} style={{
-            background:sortBy===s.k?"#d97706":"var(--surface)",
-            color:sortBy===s.k?"#fff":"var(--muted)",
-            border:`1px solid ${sortBy===s.k?"#d97706":"var(--border)"}`,
-            borderRadius:20, padding:"4px 12px", cursor:"pointer",
-            fontSize:11, fontFamily:"var(--font)", fontWeight:600, transition:"all .15s",
-          }}>{s.l} {sortBy===s.k?(sortDir==="asc"?"↑":"↓"):""}</button>
-        ))}
+        <SortBtn col="created" label="Created" />
+        <SortBtn col="date"    label="Posted" />
+        <SortBtn col="score"   label="Score" />
+        <SortBtn col="company" label="Company" />
       </div>
 
+      {/* Table */}
       <Card style={{ padding:0, overflow:"hidden" }}>
-        <div style={{ display:"grid", gridTemplateColumns:"1.2fr 160px 110px 90px 110px 80px", padding:"10px 16px", borderBottom:"1px solid var(--border)", fontSize:10, textTransform:"uppercase", letterSpacing:.8, color:"var(--muted)", fontWeight:700, background:"var(--surface2)" }}>
-          <span>Company / Role</span><span>Contact</span><span>Industry</span><span>Score</span><span>Status</span><span>Action</span>
+        {/* Header row */}
+        <div style={{ display:"grid", gridTemplateColumns:"36px 44px 1.2fr 160px 110px 80px 110px 90px", padding:"10px 16px", borderBottom:"1px solid var(--border)", fontSize:10, textTransform:"uppercase", letterSpacing:.8, color:"var(--muted)", fontWeight:700, background:"var(--surface2)", alignItems:"center" }}>
+          <input type="checkbox" checked={allSelected} ref={el => { if (el) el.indeterminate = someSelected && !allSelected; }}
+            onChange={toggleSelectAll} style={{ cursor:"pointer", width:14, height:14 }} />
+          <span>#</span>
+          <span>Company / Role</span>
+          <span>Contact</span>
+          <span>Industry</span>
+          <span>Score</span>
+          <span>Status</span>
+          <span>Actions</span>
         </div>
-        {displayed.map((lead,i) => (
-          <div key={lead.id} style={{
-            display:"grid", gridTemplateColumns:"1.2fr 160px 110px 90px 110px 80px",
-            padding:"12px 16px", borderBottom:i<displayed.length-1?"1px solid var(--border)":"none",
-            alignItems:"center", transition:"background .12s",
-          }}
-            onMouseEnter={e=>e.currentTarget.style.background="var(--surface2)"}
-            onMouseLeave={e=>e.currentTarget.style.background="transparent"}
-          >
-            <div>
-              <div style={{ fontWeight:700, fontSize:13 }}>{lead.company_name}</div>
-              <div style={{ color:"var(--muted)", fontSize:11, marginTop:2 }}>
-                {lead.job_title} · {lead.posted_at ? `${Math.floor((Date.now()-new Date(lead.posted_at))/864e5)}d ago` : "—"}
-                {lead.job_url && (
-                  <a href={lead.job_url} target="_blank" rel="noopener noreferrer" title="View job description on LinkedIn" style={{
-                    marginLeft:6, fontSize:10, color:"var(--accent)", textDecoration:"none",
-                    background:"#dbeafe", borderRadius:4, padding:"1px 5px", fontWeight:600,
-                  }}>JD ↗</a>
+
+        {displayed.map((lead, i) => {
+          const isSelected = selected.has(lead.id);
+          return (
+            <div key={lead.id} style={{
+              display:"grid", gridTemplateColumns:"36px 44px 1.2fr 160px 110px 80px 110px 90px",
+              padding:"11px 16px",
+              borderBottom: i < displayed.length-1 ? "1px solid var(--border)" : "none",
+              alignItems:"center", transition:"background .12s",
+              background: isSelected ? "#eff6ff" : "transparent",
+            }}
+              onMouseEnter={e=>{ if (!isSelected) e.currentTarget.style.background="var(--surface2)"; }}
+              onMouseLeave={e=>{ if (!isSelected) e.currentTarget.style.background="transparent"; }}
+            >
+              {/* Checkbox */}
+              <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(lead.id)}
+                style={{ cursor:"pointer", width:14, height:14 }} />
+
+              {/* Serial number */}
+              <span style={{ fontSize:11, color:"var(--muted)", fontWeight:600 }}>{i + 1}</span>
+
+              {/* Company / Role */}
+              <div>
+                <div style={{ fontWeight:700, fontSize:13 }}>{lead.company_name}</div>
+                <div style={{ color:"var(--muted)", fontSize:11, marginTop:2 }}>
+                  {lead.job_title} · {lead.posted_at ? `${Math.floor((Date.now()-new Date(lead.posted_at))/864e5)}d ago` : "—"}
+                  {lead.job_url && (
+                    <a href={lead.job_url} target="_blank" rel="noopener noreferrer" style={{
+                      marginLeft:6, fontSize:10, color:"var(--accent)", textDecoration:"none",
+                      background:"#dbeafe", borderRadius:4, padding:"1px 5px", fontWeight:600,
+                    }}>JD ↗</a>
+                  )}
+                </div>
+                {lead.created_at && (
+                  <div style={{ fontSize:10, color:"var(--muted)", marginTop:2 }}>
+                    Added {new Date(lead.created_at).toLocaleDateString()}
+                  </div>
                 )}
               </div>
-            </div>
-            <div style={{ fontSize:11 }}>
-              {lead.contact_email ? (
-                <>
-                  <div style={{ fontWeight:600 }}>{lead.first_name} {lead.last_name}</div>
-                  <div style={{ color:"var(--muted)" }}>{lead.contact_title}</div>
-                  <div style={{ color:"var(--accent)", fontSize:10, marginTop:2, wordBreak:"break-all" }}>{lead.contact_email}</div>
-                  {lead.email_verified && <Badge variant="success">✓ verified</Badge>}
-                </>
-              ) : <span style={{ color:"var(--danger)", fontSize:11 }}>No contact</span>}
-            </div>
-            <div><Badge variant={lead.industry?.includes("AI")?"purple":"default"}>{lead.industry}</Badge></div>
-            <div><ScoreBadge score={lead.score} /></div>
-            <div><StatusBadge status={lead.status} /></div>
-            <div>
-              {!lead.contact_email && (
-                <Btn size="sm" variant="outline" onClick={()=>onEnrich(lead.id, lead.company_name)} disabled={enriching===lead.id}>
-                  {enriching===lead.id ? <Spinner size={11}/> : "Enrich"}
+
+              {/* Contact */}
+              <div style={{ fontSize:11 }}>
+                {lead.contact_email ? (
+                  <>
+                    <div style={{ fontWeight:600 }}>{lead.first_name} {lead.last_name}</div>
+                    <div style={{ color:"var(--muted)" }}>{lead.contact_title}</div>
+                    <div style={{ color:"var(--accent)", fontSize:10, marginTop:2, wordBreak:"break-all" }}>{lead.contact_email}</div>
+                    {lead.email_verified && <Badge variant="success">✓ verified</Badge>}
+                  </>
+                ) : <span style={{ color:"var(--danger)", fontSize:11 }}>No contact</span>}
+              </div>
+
+              {/* Industry */}
+              <div><Badge variant={lead.industry?.includes("AI")?"purple":"default"}>{lead.industry}</Badge></div>
+
+              {/* Score */}
+              <div><ScoreBadge score={lead.score} /></div>
+
+              {/* Status */}
+              <div><StatusBadge status={lead.status} /></div>
+
+              {/* Actions */}
+              <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+                {!lead.contact_email && (
+                  <Btn size="sm" variant="outline" onClick={()=>onEnrich(lead.id, lead.company_name)} disabled={enriching===lead.id}>
+                    {enriching===lead.id ? <Spinner size={11}/> : "Enrich"}
+                  </Btn>
+                )}
+                <Btn size="sm" variant="danger" onClick={()=>deleteLead(lead.id)} disabled={deletingId===lead.id}
+                  style={{ padding:"4px 8px", fontSize:11 }}>
+                  {deletingId===lead.id ? <Spinner size={10}/> : "🗑"}
                 </Btn>
-              )}
+              </div>
             </div>
-          </div>
-        ))}
-        {filtered.length===0 && <div style={{ padding:"40px 16px", textAlign:"center", color:"var(--muted)" }}>No leads matching this filter</div>}
+          );
+        })}
+
+        {filtered.length === 0 && (
+          <div style={{ padding:"40px 16px", textAlign:"center", color:"var(--muted)" }}>No leads matching this filter</div>
+        )}
+
+        {/* Pagination footer */}
         {filtered.length > 50 && (
-          <div style={{ padding:"12px 16px", textAlign:"center", borderTop:"1px solid var(--border)", background:"var(--surface2)" }}>
-            <span style={{ fontSize:12, color:"var(--muted)" }}>Showing {showAll ? filtered.length : 50} of {filtered.length} leads · </span>
-            <button onClick={() => setShowAll(s=>!s)} style={{ fontSize:12, color:"var(--accent)", background:"none", border:"none", cursor:"pointer", fontWeight:600 }}>
+          <div style={{ padding:"12px 16px", textAlign:"center", borderTop:"1px solid var(--border)", background:"var(--surface2)", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+            <span style={{ fontSize:12, color:"var(--muted)" }}>
+              Showing {showAll ? filtered.length : Math.min(50, filtered.length)} of {filtered.length} leads
+            </span>
+            <button onClick={() => setShowAll(s=>!s)} style={{
+              fontSize:12, color:"var(--accent)", background:"none", border:"none", cursor:"pointer", fontWeight:600,
+            }}>
               {showAll ? "Show less" : `Show all ${filtered.length}`}
             </button>
           </div>
@@ -957,11 +1094,65 @@ Value prop: We place pre-vetted offshore devs with US startups in under 2 weeks 
 function SettingsView({ settings, onSave }) {
   const [local, setLocal] = useState({ ...settings });
   const [saved, setSaved] = useState(false);
+  const [deploying, setDeploying] = useState(false);
+  const [deployLog, setDeployLog] = useState([]);
+  const [deployResult, setDeployResult] = useState(null);
 
   const save = () => {
     onSave(local);
     setSaved(true);
     setTimeout(()=>setSaved(false), 2000);
+  };
+
+  const deployToGitHub = async () => {
+    const azureUrl = local.azureFunctionUrl;
+    const deploySecret = local.deploySecret;
+    if (!azureUrl) { alert("Add your Azure Function URL in the Deploy section below first"); return; }
+
+    // Check if Claude has pre-loaded new file content
+    const pendingFiles = window.__HIRERAD_PENDING_DEPLOY__ || [];
+    if (!pendingFiles.length) {
+      alert("No updates pending. Claude will pre-load new files before asking you to deploy.");
+      return;
+    }
+
+    setDeploying(true);
+    setDeployLog([]);
+    setDeployResult(null);
+    const log = (msg, type="default") => setDeployLog(l => [...l, { msg, type, time: new Date().toLocaleTimeString() }]);
+
+    log(`🚀 Deploying ${pendingFiles.length} file(s) to GitHub...`, "accent");
+    pendingFiles.forEach(f => log(`📦 ${f.repo} → ${f.path}`, "default"));
+
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (deploySecret) headers["x-deploy-secret"] = deploySecret;
+
+      const res = await fetch(azureUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ files: pendingFiles }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        data.results.forEach(r => log(`✅ ${r.path} committed (${r.commit})`, "success"));
+        log("🎉 Done! Vercel + Railway deploying in ~60s", "success");
+        setDeployResult({ success: true, results: data.results });
+        window.__HIRERAD_PENDING_DEPLOY__ = []; // clear after success
+      } else {
+        data.results?.forEach(r => {
+          if (r.status === "success") log(`✅ ${r.path} deployed`, "success");
+          else log(`❌ ${r.path}: ${r.error}`, "error");
+        });
+        setDeployResult({ success: false });
+      }
+    } catch(err) {
+      log(`❌ Deploy failed: ${err.message}`, "error");
+      setDeployResult({ success: false });
+    }
+    setDeploying(false);
   };
 
   const KeyField = ({ label, hint, field, type="password" }) => (
@@ -1016,6 +1207,68 @@ function SettingsView({ settings, onSave }) {
       </Card>
 
       <Card>
+        <div style={{ fontWeight:700, fontSize:15, marginBottom:4 }}>⚙️ Azure Auto-Deploy</div>
+        <p style={{ color:"var(--muted)", fontSize:12, marginBottom:16 }}>
+          Push code changes directly to GitHub → triggers Vercel & Railway auto-deploy
+        </p>
+
+        <div style={{ marginBottom:12 }}>
+          <Label>Azure Function URL</Label>
+          <Input
+            type="text"
+            placeholder="https://your-function.azurewebsites.net/api/deploy"
+            value={local.azureFunctionUrl||""}
+            onChange={e=>setLocal(p=>({...p,azureFunctionUrl:e.target.value}))}
+          />
+        </div>
+        <div style={{ marginBottom:16 }}>
+          <Label>Deploy Secret (optional)</Label>
+          <Input
+            type="password"
+            placeholder="Your x-deploy-secret value"
+            value={local.deploySecret||""}
+            onChange={e=>setLocal(p=>({...p,deploySecret:e.target.value}))}
+          />
+        </div>
+
+        <PendingDeployStatus />
+
+        <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:16 }}>
+          <Btn onClick={deployToGitHub} disabled={deploying||!local.azureFunctionUrl} variant="success" style={{ minWidth:180 }}>
+            {deploying
+              ? <><Spinner size={14}/>Deploying...</>
+              : "🚀 Deploy to GitHub"}
+          </Btn>
+          {deployResult && (
+            <span style={{ fontSize:12, fontWeight:700, color: deployResult.success ? "var(--accent3)" : "var(--danger)" }}>
+              {deployResult.success ? "✅ Deployed successfully!" : "❌ Deploy failed"}
+            </span>
+          )}
+        </div>
+
+        {deployLog.length > 0 && (
+          <div style={{ fontFamily:"var(--mono)", fontSize:11, lineHeight:2, background:"var(--surface2)", borderRadius:8, padding:12, maxHeight:200, overflowY:"auto" }}>
+            {deployLog.map((l,i) => (
+              <div key={i} style={{ color: l.type==="success"?"var(--accent3)":l.type==="error"?"var(--danger)":l.type==="accent"?"var(--accent)":l.type==="warn"?"var(--warn)":"var(--muted)" }}>
+                <span style={{ opacity:.4 }}>{l.time}</span>{"  "}{l.msg}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {deployResult?.results?.length > 0 && (
+          <div style={{ marginTop:12, display:"flex", flexDirection:"column", gap:6 }}>
+            {deployResult.results.map((r,i) => r.url && (
+              <a key={i} href={r.url} target="_blank" rel="noreferrer"
+                style={{ fontSize:11, color:"var(--accent)", fontFamily:"var(--mono)" }}>
+                🔗 {r.repo}/{r.path} @ {r.commit}
+              </a>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card>
         <div style={{ fontWeight:700, fontSize:15, marginBottom:12 }}>🚀 Backend Setup</div>
         <div style={{ fontFamily:"var(--mono)", fontSize:12, lineHeight:2, color:"var(--muted)", background:"var(--surface2)", borderRadius:8, padding:14 }}>
           {["cd hirerad-backend","npm install","cp env.example .env   # fill in your keys","npm run dev              # start API on :4000"].map((cmd,i)=>(
@@ -1037,15 +1290,19 @@ export default function App() {
 
   // Load API keys from localStorage
   const [settings, setSettings] = useState(() => ({
-    apolloKey:    LS.get("hr_apollo"),
-    apifyKey:     LS.get("hr_apify"),
-    instantlyKey: LS.get("hr_instantly"),
+    apolloKey:        LS.get("hr_apollo"),
+    apifyKey:         LS.get("hr_apify"),
+    instantlyKey:     LS.get("hr_instantly"),
+    azureFunctionUrl: LS.get("hr_azure_url"),
+    deploySecret:     LS.get("hr_deploy_secret"),
   }));
 
   const saveSettings = (s) => {
-    LS.set("hr_apollo",    s.apolloKey    || "");
-    LS.set("hr_apify",     s.apifyKey     || "");
-    LS.set("hr_instantly", s.instantlyKey || "");
+    LS.set("hr_apollo",    s.apolloKey         || "");
+    LS.set("hr_apify",     s.apifyKey          || "");
+    LS.set("hr_instantly", s.instantlyKey      || "");
+    LS.set("hr_azure_url", s.azureFunctionUrl  || "");
+    LS.set("hr_deploy_secret", s.deploySecret  || "");
     setSettings(s);
   };
 
