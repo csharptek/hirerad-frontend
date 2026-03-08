@@ -145,8 +145,8 @@ const Label = ({ children }) => (
 
 // Shows pending files Claude has pre-loaded for deployment
 const PendingDeployStatus = () => {
-  const [pending, setPending] = React.useState([]);
-  React.useEffect(() => {
+  const [pending, setPending] = useState([]);
+  useEffect(() => {
     const check = () => setPending(window.__HIRERAD_PENDING_DEPLOY__ || []);
     check();
     const t = setInterval(check, 1000);
