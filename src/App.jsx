@@ -177,6 +177,8 @@ const Card = ({ children, style }) => (
 
 /* ─── Dashboard ──────────────────────────────────────────────────────────── */
 function DashboardView({ stats, leads }) {
+  const [now, setNow] = useState(new Date());
+  useEffect(() => { const t = setInterval(() => setNow(new Date()), 60000); return () => clearInterval(t); }, []);
   const byIndustry = leads.reduce((a,l) => { a[l.industry]=(a[l.industry]||0)+1; return a; }, {});
   const pipeline = [
     { label:"Scraped",   val:leads.length,                                    color:"#2563eb" },
@@ -190,7 +192,7 @@ function DashboardView({ stats, leads }) {
     <div style={{ display:"flex", flexDirection:"column", gap:24 }} className="slide-in">
       <div>
         <h2 style={{ fontSize:22, fontWeight:800, color:"var(--text)" }}>System Overview</h2>
-        <p style={{ color:"var(--muted)", fontSize:13, marginTop:4 }}>Real-time pipeline metrics</p>
+        <p style={{ color:"var(--muted)", fontSize:13, marginTop:4 }}>Real-time pipeline metrics · <span style={{ fontFamily:"var(--mono)" }}>{now.toLocaleTimeString()}</span></p>
       </div>
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:14 }}>
         <StatCard label="Total Leads"    value={stats?.leads_total    ?? leads.length}                       accent="#2563eb" icon="🎯" />
@@ -926,164 +928,531 @@ function ApolloView({ settings, leads }) {
 
 /* ─── Campaign View ──────────────────────────────────────────────────────── */
 function CampaignView({ leads, backendOk, settings }) {
-  const [step, setStep]          = useState(1);
-  const [selected, setSelected]  = useState(null);
-  const [genEmail, setGenEmail]  = useState(null);
-  const [generating, setGenerating] = useState(false);
-  const [launching, setLaunching] = useState(false);
-  const [launchResult, setLaunch] = useState(null);
+  const [selected, setSelected]       = useState(null);
+  const [sequence, setSequence]       = useState(null);
+  const [generating, setGenerating]   = useState(false);
+  const [regenStep, setRegenStep]     = useState(null); // which step is being individually regenerated
+  const [activeStep, setActiveStep]   = useState(0);
+  const [tone, setTone]               = useState("casual");
+  const [edited, setEdited]           = useState({});
+  const [copied, setCopied]           = useState(null);
+  const [launching, setLaunching]     = useState(false);
+  const [launchResult, setLaunch]     = useState(null);
+  const [genError, setGenError]       = useState(null);
+  const [viewMode, setViewMode]       = useState("edit"); // "edit" | "preview"
+  const [showConfig, setShowConfig]   = useState(false);
+  const [senderConfig, setSenderConfig] = useState({
+    senderName:   LS.get("hr_sender_name",  ""),
+    companyName:  LS.get("hr_company_name", "our dev staffing firm"),
+    valueProps:   LS.get("hr_value_props",  "pre-vetted offshore engineers · placed in under 2 weeks · 60% cheaper than local hires · no long-term contracts"),
+    callToAction: LS.get("hr_cta",          "open to a 15-min call this week?"),
+  });
 
-  const qualified = leads.filter(l => l.score>=2 && l.contact_email);
+  const saveSenderConfig = (cfg) => {
+    setSenderConfig(cfg);
+    LS.set("hr_sender_name",  cfg.senderName);
+    LS.set("hr_company_name", cfg.companyName);
+    LS.set("hr_value_props",  cfg.valueProps);
+    LS.set("hr_cta",          cfg.callToAction);
+  };
 
-  const [genError, setGenError] = useState(null);
+  const qualified = leads.filter(l => l.score >= 2 && l.contact_email);
 
-  const generateEmail = async () => {
-    if (!selected) return;
-    setGenerating(true); setGenEmail(null); setGenError(null);
-    const stepLabels = ["Initial Outreach","Value Follow-up","Social Proof","Final Nudge"];
-    const stepInstructions = [
-      "This is the FIRST email — cold intro. Reference their specific job posting. Be ultra-brief, curious, and end with one soft question. No pitching yet.",
-      "This is a FOLLOW-UP (day 3). They haven\'t replied. Reference that you reached out before. Add one specific value point about 60% cost savings + 2-week placement. End with a question.",
-      "This is a SOCIAL PROOF email (day 6). Mention that similar startups in their industry have used your service. Keep it short. One line of proof, one ask.",
-      "This is the FINAL email (day 10). Keep it very short — 3 sentences max. Acknowledge it might not be the right time. Leave the door open. No pressure.",
-    ];
-    const daysPosted = selected.posted_at ? Math.floor((Date.now()-new Date(selected.posted_at))/864e5) : null;
-    const urgency = daysPosted !== null && daysPosted <= 3 ? "They posted this role very recently (${daysPosted}d ago) — they are actively hiring RIGHT NOW." : "";
-    try {
-      const result = await callClaude(
-        `You are an expert B2B cold email copywriter. You write short, human, personalized cold emails for a dev staffing firm that places pre-vetted offshore software engineers with US startups — 60% cheaper than local hires, placed in under 2 weeks.
+  const toneGuides = {
+    casual:       "Warm, friendly, like a peer. Conversational. Use contractions. No marketing-speak.",
+    professional: "Polished but human. Respectful, clear. Slightly more formal but not stiff.",
+    direct:       "Ultra-brief. No fluff. State the value, ask one thing, stop. Respect their time.",
+    bold:         "Confident and slightly provocative. Make them feel they're missing out. Direct but not rude.",
+  };
 
-Rules:
-- Sound like a real person, not a robot or marketer
-- Never use buzzwords like "synergy", "leverage", "circle back"
-- Max 80 words for body
-- Use their first name, company name, and job title naturally
-- Respond ONLY with valid JSON: {"subject":"...","body":"..."}
-- No markdown, no code blocks, just raw JSON`,
-        `Write step ${step} of 4 (${stepLabels[step-1]}) for this lead:
+  const STEPS = [
+    { day: "Day 1",  label: "Initial Outreach", icon: "🚀", color: "#2563eb",
+      instruction: "First cold email. Reference their SPECIFIC open role by name. Show you noticed one specific thing about their company or role. One soft question at the end. Zero hard selling. Under 65 words body." },
+    { day: "Day 3",  label: "Value Follow-up",  icon: "💡", color: "#7c3aed",
+      instruction: "They haven't replied. Ultra-short nudge. Reference your first email in one casual clause. Add the single most compelling stat from value props. End with a yes/no question. Under 50 words body." },
+    { day: "Day 6",  label: "Social Proof",     icon: "⭐", color: "#d97706",
+      instruction: "Social proof angle. Mention that other [industry] startups we worked with had the same hiring need. One concrete credibility line. One very low-friction ask (15-min call or just reply yes/no). Under 55 words body." },
+    { day: "Day 10", label: "Final Nudge",      icon: "🎯", color: "#059669",
+      instruction: "Final breakup email. 3 sentences max. Acknowledge timing might be off. Leave door completely open with zero pressure. End on a warm human note. Under 40 words body." },
+  ];
 
-Name: ${selected.first_name} ${selected.last_name}
-Title: ${selected.contact_title}
-Company: ${selected.company_name}
-Industry: ${selected.industry || "Tech"}
-Currently hiring for: ${selected.job_title}
+  const buildLeadContext = (lead) => {
+    const daysPosted = lead.posted_at
+      ? Math.floor((Date.now() - new Date(lead.posted_at)) / 864e5)
+      : null;
+    const urgency = daysPosted !== null && daysPosted <= 5
+      ? `URGENCY: They posted "${lead.job_title}" only ${daysPosted} day(s) ago — fresh & actively hiring.`
+      : daysPosted !== null
+      ? `They posted "${lead.job_title}" ${daysPosted} days ago.`
+      : "";
+    return `
+Prospect: ${lead.first_name || "Founder"} ${lead.last_name || ""}
+Title: ${lead.contact_title || "Founder/CTO"}
+Company: ${lead.company_name} (${lead.employee_count || "small"} employees)
+Industry: ${lead.industry || "Tech"}
+Hiring for: ${lead.job_title}
+${lead.domain ? `Website: ${lead.domain}` : ""}
 ${urgency}
+    `.trim();
+  };
 
-Step instruction: ${stepInstructions[step-1]}
+  const buildSystemPrompt = () => {
+    const senderLine = senderConfig.senderName
+      ? `You are writing as ${senderConfig.senderName} from ${senderConfig.companyName}.`
+      : `You are writing on behalf of ${senderConfig.companyName}.`;
+    return `You are an elite B2B cold email copywriter. ${senderLine}
 
-Value prop: We place pre-vetted offshore devs with US startups in under 2 weeks at 60% the cost of local engineers. No long-term contracts.`
-      );
-      setGenEmail(result);
-    } catch(err) {
+VALUE PROPS (weave these in naturally, don't list them robotically):
+${senderConfig.valueProps}
+
+PREFERRED CTA: "${senderConfig.callToAction}"
+
+TONE: ${tone.toUpperCase()} — ${toneGuides[tone]}
+
+GOLDEN RULES:
+- Sound like a real human, never a marketer
+- Forbidden words/phrases: leverage, synergy, circle back, hope this finds you, touching base, I wanted to reach out, game-changer, cutting-edge, streamline, revolutionary, innovative solution
+- Use first name naturally (once max, in opener or subject only)
+- Subject lines: lowercase preferred, no clickbait, specific > generic, under 8 words
+- Always give an ALTERNATIVE subject that takes a completely different angle
+- Body: max word counts strictly enforced per step
+- Respond ONLY with valid JSON — no markdown, no code blocks, no preamble`;
+  };
+
+  const generateSequence = async () => {
+    if (!selected) return;
+    setGenerating(true); setSequence(null); setGenError(null); setEdited({});
+
+    const systemPrompt = buildSystemPrompt() + `
+Return exactly 4 email objects as a JSON array:
+[{"subject":"...","altSubject":"...","body":"...","psLine":"..."},...]
+psLine is an optional P.S. line for Step 1 only (empty string for other steps). No other text outside the JSON.`;
+
+    const userPrompt = `Write all 4 emails for this lead:
+
+${buildLeadContext(selected)}
+
+Step instructions:
+${STEPS.map((s, i) => `Step ${i + 1} (${s.label}, ${s.day}): ${s.instruction}`).join("\n")}
+
+Return exactly 4 email objects. No other text.`;
+
+    try {
+      const result = await callClaude(systemPrompt, userPrompt);
+      let emails = result;
+      if (result && result.content) {
+        const text = Array.isArray(result.content)
+          ? result.content.filter(b => b.type === "text").map(b => b.text).join("")
+          : result.content;
+        emails = JSON.parse(text.replace(/```json|```/g, "").trim());
+      }
+      if (!Array.isArray(emails)) throw new Error("Expected array of 4 emails");
+      setSequence(emails);
+      setActiveStep(0);
+    } catch (err) {
       setGenError(err.message);
     }
     setGenerating(false);
   };
+
+  const regenerateStep = async (stepIdx) => {
+    if (!selected || !sequence) return;
+    setRegenStep(stepIdx);
+
+    const s = STEPS[stepIdx];
+    const systemPrompt = buildSystemPrompt() + `
+Return exactly 1 email object as a JSON object (not an array):
+{"subject":"...","altSubject":"...","body":"...","psLine":"..."}
+No other text outside the JSON.`;
+
+    const userPrompt = `Rewrite Step ${stepIdx + 1} (${s.label}) for this lead:
+
+${buildLeadContext(selected)}
+
+Step instruction: ${s.instruction}
+
+Return exactly 1 email object. No other text.`;
+
+    try {
+      const result = await callClaude(systemPrompt, userPrompt);
+      let email = result;
+      if (result && result.content) {
+        const text = Array.isArray(result.content)
+          ? result.content.filter(b => b.type === "text").map(b => b.text).join("")
+          : result.content;
+        email = JSON.parse(text.replace(/```json|```/g, "").trim());
+      }
+      if (typeof email !== "object" || Array.isArray(email)) throw new Error("Expected single email object");
+      // Merge into sequence
+      const newSeq = [...sequence];
+      newSeq[stepIdx] = email;
+      setSequence(newSeq);
+      // Clear any edits for this step
+      setEdited(e => { const n = {...e}; delete n[stepIdx]; return n; });
+    } catch (err) {
+      setGenError(`Step ${stepIdx + 1} regen: ${err.message}`);
+    }
+    setRegenStep(null);
+  };
+
+  const getEmail = (i) => {
+    const base = sequence?.[i] || {};
+    return { ...base, ...edited[i] };
+  };
+
+  const updateEmail = (i, field, val) => {
+    setEdited(e => ({ ...e, [i]: { ...e[i], [field]: val } }));
+  };
+
+  const copyAll = () => {
+    if (!sequence) return;
+    const text = STEPS.map((s, i) => {
+      const e = getEmail(i);
+      return `--- ${s.label} (${s.day}) ---\nSubject: ${e.subject}\n\n${e.body}`;
+    }).join("\n\n");
+    navigator.clipboard?.writeText(text);
+    setCopied("all");
+    setTimeout(() => setCopied(null), 2000);
+  };
+
+  const copyStep = (i) => {
+    const e = getEmail(i);
+    navigator.clipboard?.writeText(`Subject: ${e.subject}\n\n${e.body}`);
+    setCopied(i);
+    setTimeout(() => setCopied(null), 2000);
+  };
+
+  const useAltSubject = (i) => {
+    const e = getEmail(i);
+    const main = e.subject; const alt = e.altSubject;
+    updateEmail(i, "subject", alt);
+    updateEmail(i, "altSubject", main);
+  };
+
+  const wordCount = (text) => text?.trim().split(/\s+/).filter(Boolean).length || 0;
 
   const launchCampaign = async () => {
     if (!qualified.length) return;
     setLaunching(true);
     if (backendOk && settings.instantlyKey) {
       try {
-        const result = await apiFetch("/campaign/launch", { method:"POST", body:JSON.stringify({ lead_ids:qualified.map(l=>l.id), instantlyKey:settings.instantlyKey }) });
-        setLaunch({ success:true, msg:`Launched ${result.results.filter(r=>r.status==="launched").length} leads` });
-      } catch(err) { setLaunch({ success:false, msg:err.message }); }
+        const result = await apiFetch("/campaign/launch", { method: "POST", body: JSON.stringify({ lead_ids: qualified.map(l => l.id), instantlyKey: settings.instantlyKey }) });
+        setLaunch({ success: true, msg: `Launched ${result.results.filter(r => r.status === "launched").length} leads` });
+      } catch (err) { setLaunch({ success: false, msg: err.message }); }
     } else {
-      await new Promise(r=>setTimeout(r,1500));
-      setLaunch({ success:true, msg:`Demo: Would launch ${qualified.length} leads (add Instantly key in Settings)` });
+      await new Promise(r => setTimeout(r, 1500));
+      setLaunch({ success: true, msg: `Demo: Would launch ${qualified.length} leads (add Instantly key in Settings)` });
     }
     setLaunching(false);
   };
 
-  const STEPS = [
-    { day:"Day 1", label:"Initial Outreach", icon:"🚀", color:"#2563eb" },
-    { day:"Day 3", label:"Value Follow-up",  icon:"💡", color:"#7c3aed" },
-    { day:"Day 6", label:"Social Proof",     icon:"⭐", color:"#d97706" },
-    { day:"Day 10",label:"Final Nudge",      icon:"🎯", color:"#059669" },
-  ];
+  const activeEmail = sequence ? getEmail(activeStep) : null;
+  const step = STEPS[activeStep];
+
+  // Email preview renderer
+  const renderPreview = (email, stepIdx) => {
+    const s = STEPS[stepIdx];
+    return (
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", boxShadow: "var(--shadow)" }}>
+        {/* Email client chrome */}
+        <div style={{ background: "var(--surface2)", borderBottom: "1px solid var(--border)", padding: "10px 16px" }}>
+          <div style={{ fontSize: 11, color: "var(--muted)", display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <span><strong style={{ color: "var(--text)" }}>To:</strong> {selected?.first_name} {selected?.last_name} &lt;{selected?.contact_email}&gt;</span>
+            {senderConfig.senderName && <span><strong style={{ color: "var(--text)" }}>From:</strong> {senderConfig.senderName}</span>}
+          </div>
+          <div style={{ marginTop: 6, fontSize: 14, fontWeight: 700, color: "var(--text)" }}>
+            {email.subject || "(no subject)"}
+          </div>
+          <div style={{ marginTop: 2, fontSize: 11, color: "var(--muted)" }}>{s.day} · {wordCount(email.body)} words</div>
+        </div>
+        <div style={{ padding: "20px 24px", fontSize: 14, lineHeight: 1.85, color: "var(--text)", whiteSpace: "pre-wrap", fontFamily: "Georgia, serif" }}>
+          {email.body}
+          {email.psLine && <div style={{ marginTop: 16, fontStyle: "italic", color: "var(--muted)", fontSize: 13 }}>P.S. {email.psLine}</div>}
+        </div>
+      </div>
+    );
+  };
 
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:20 }} className="slide-in">
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:12 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }} className="slide-in">
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
         <div>
-          <h2 style={{ fontSize:22, fontWeight:800 }}>Email Campaigns</h2>
-          <p style={{ color:"var(--muted)", fontSize:13, marginTop:4 }}>AI-generated 4-touch sequence · Instantly.ai</p>
+          <h2 style={{ fontSize: 22, fontWeight: 800 }}>Email Campaigns</h2>
+          <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>AI-generated 4-touch sequence · Instantly.ai</p>
         </div>
-        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-          {launchResult && <div style={{ fontSize:12, color:launchResult.success?"var(--accent3)":"var(--danger)", fontWeight:600 }}>{launchResult.success?"✅":"❌"} {launchResult.msg}</div>}
-          <Btn variant="success" onClick={launchCampaign} disabled={launching||!qualified.length}>
-            {launching ? <><Spinner size={14}/>Launching...</> : `🚀 Launch (${qualified.length} leads)`}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {launchResult && <div style={{ fontSize: 12, color: launchResult.success ? "var(--accent3)" : "var(--danger)", fontWeight: 600 }}>{launchResult.success ? "✅" : "❌"} {launchResult.msg}</div>}
+          <Btn variant="ghost" size="sm" onClick={() => setShowConfig(c => !c)}>
+            ⚙️ {showConfig ? "Hide" : "Sender Setup"}
+          </Btn>
+          <Btn variant="success" onClick={launchCampaign} disabled={launching || !qualified.length}>
+            {launching ? <><Spinner size={14} />Launching...</> : `🚀 Launch (${qualified.length} leads)`}
           </Btn>
         </div>
       </div>
 
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
-        {STEPS.map((s,i) => (
-          <div key={i} onClick={()=>setStep(i+1)} style={{
-            background:step===i+1?`${s.color}12`:"var(--surface)",
-            border:`1px solid ${step===i+1?s.color:"var(--border)"}`,
-            borderRadius:10, padding:16, cursor:"pointer", transition:"all .2s",
-            boxShadow:"var(--shadow)",
+      {/* Sender Config Panel */}
+      {showConfig && (
+        <Card style={{ background: "#eff6ff", border: "1px solid #bfdbfe" }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12, color: "#1d4ed8" }}>⚙️ Sender & Company Config <span style={{ fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>(saved to browser)</span></div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            <div>
+              <Label>Your Name (optional)</Label>
+              <Input placeholder="e.g. Alex Chen" value={senderConfig.senderName}
+                onChange={e => saveSenderConfig({...senderConfig, senderName: e.target.value})} />
+            </div>
+            <div>
+              <Label>Company Name</Label>
+              <Input placeholder="e.g. TalentBridge" value={senderConfig.companyName}
+                onChange={e => saveSenderConfig({...senderConfig, companyName: e.target.value})} />
+            </div>
+            <div style={{ gridColumn: "1 / -1" }}>
+              <Label>Value Props (bullet-point style, Claude will weave in naturally)</Label>
+              <Input placeholder="e.g. pre-vetted engineers · placed in 2 weeks · 60% cheaper · no contracts" value={senderConfig.valueProps}
+                onChange={e => saveSenderConfig({...senderConfig, valueProps: e.target.value})} />
+            </div>
+            <div style={{ gridColumn: "1 / -1" }}>
+              <Label>Preferred Call-to-Action</Label>
+              <Input placeholder="e.g. open to a 15-min call?" value={senderConfig.callToAction}
+                onChange={e => saveSenderConfig({...senderConfig, callToAction: e.target.value})} />
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Step tabs */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
+        {STEPS.map((s, i) => (
+          <div key={i} onClick={() => setActiveStep(i)} style={{
+            background: activeStep === i ? `${s.color}12` : "var(--surface)",
+            border: `1px solid ${activeStep === i ? s.color : sequence ? `${s.color}60` : "var(--border)"}`,
+            borderRadius: 10, padding: 16, cursor: "pointer", transition: "all .2s",
+            boxShadow: "var(--shadow)", position: "relative",
           }}>
-            <div style={{ fontSize:20, marginBottom:6 }}>{s.icon}</div>
-            <div style={{ fontSize:11, color:s.color, fontWeight:700 }}>{s.day}</div>
-            <div style={{ fontSize:13, fontWeight:600, marginTop:2 }}>{s.label}</div>
+            {sequence && <div style={{ position: "absolute", top: 8, right: 10, width: 8, height: 8, borderRadius: "50%", background: s.color }} />}
+            <div style={{ fontSize: 20, marginBottom: 6 }}>{s.icon}</div>
+            <div style={{ fontSize: 11, color: s.color, fontWeight: 700 }}>{s.day}</div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginTop: 2 }}>{s.label}</div>
           </div>
         ))}
       </div>
 
-      <div style={{ display:"grid", gridTemplateColumns:"260px 1fr", gap:16 }}>
-        <Card style={{ padding:0, overflow:"hidden" }}>
-          <div style={{ padding:"10px 14px", borderBottom:"1px solid var(--border)", background:"var(--surface2)" }}>
+      {/* Main grid */}
+      <div style={{ display: "grid", gridTemplateColumns: "240px 1fr", gap: 16 }}>
+        {/* Lead list */}
+        <Card style={{ padding: 0, overflow: "hidden" }}>
+          <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--surface2)" }}>
             <Label>Qualified Leads ({qualified.length})</Label>
           </div>
-          <div style={{ maxHeight:360, overflowY:"auto" }}>
-            {qualified.length===0 && <div style={{ padding:24, textAlign:"center", color:"var(--muted)", fontSize:12 }}>No qualified leads with contacts yet</div>}
+          <div style={{ maxHeight: 460, overflowY: "auto" }}>
+            {qualified.length === 0 && <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>No qualified leads with contacts yet</div>}
             {qualified.map(l => (
-              <div key={l.id} onClick={()=>{ setSelected(l); setGenEmail(null); }} style={{
-                padding:"11px 14px", cursor:"pointer", borderBottom:"1px solid var(--border)",
-                background:selected?.id===l.id?"#dbeafe":"transparent",
-                borderLeft:`3px solid ${selected?.id===l.id?"var(--accent)":"transparent"}`,
-                transition:"all .15s",
+              <div key={l.id} onClick={() => { setSelected(l); setSequence(null); setGenError(null); setEdited({}); }} style={{
+                padding: "11px 14px", cursor: "pointer", borderBottom: "1px solid var(--border)",
+                background: selected?.id === l.id ? "#dbeafe" : "transparent",
+                borderLeft: `3px solid ${selected?.id === l.id ? "var(--accent)" : "transparent"}`,
+                transition: "all .15s",
               }}>
-                <div style={{ fontWeight:700, fontSize:12 }}>{l.company_name}</div>
-                <div style={{ color:"var(--muted)", fontSize:11, marginTop:1 }}>{l.first_name} {l.last_name} · {l.contact_title}</div>
-                <div style={{ marginTop:4 }}><ScoreBadge score={l.score} /></div>
+                <div style={{ fontWeight: 700, fontSize: 12 }}>{l.company_name}</div>
+                <div style={{ color: "var(--muted)", fontSize: 11, marginTop: 1 }}>{l.first_name} {l.last_name} · {l.contact_title}</div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 1, fontStyle: "italic" }}>{l.job_title}</div>
+                <div style={{ marginTop: 4 }}><ScoreBadge score={l.score} /></div>
               </div>
             ))}
           </div>
         </Card>
 
-        <Card>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
+        {/* Generator panel */}
+        <Card style={{ display: "flex", flexDirection: "column", gap: 0, padding: 0, overflow: "hidden" }}>
+          {/* Toolbar */}
+          <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", background: "var(--surface2)", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
             <div>
-              <div style={{ fontWeight:700 }}>AI Email Generator — Step {step}</div>
-              {selected && <div style={{ color:"var(--muted)", fontSize:12, marginTop:2 }}>for {selected.first_name} at {selected.company_name}</div>}
+              <div style={{ fontWeight: 700, fontSize: 14 }}>
+                {selected
+                  ? <span>✍️ {selected.first_name || selected.company_name} <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 12 }}>· {selected.company_name}</span></span>
+                  : "AI Email Generator"}
+              </div>
+              {selected && <div style={{ color: "var(--muted)", fontSize: 11, marginTop: 2 }}>Hiring: {selected.job_title} · {selected.contact_title || "Decision maker"}</div>}
             </div>
-            <Btn onClick={generateEmail} disabled={!selected||generating}>
-              {generating ? <><Spinner size={14}/>Generating...</> : "✨ Generate"}
-            </Btn>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              {/* Tone selector */}
+              <div style={{ display: "flex", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                {["casual", "professional", "direct", "bold"].map(t => (
+                  <button key={t} onClick={() => setTone(t)} style={{
+                    padding: "5px 10px", fontSize: 11, fontWeight: 600, border: "none", cursor: "pointer",
+                    background: tone === t ? "var(--accent)" : "transparent",
+                    color: tone === t ? "#fff" : "var(--muted)",
+                    fontFamily: "var(--font)", transition: "all .15s",
+                  }}>{t.charAt(0).toUpperCase() + t.slice(1)}</button>
+                ))}
+              </div>
+              {/* View mode */}
+              {sequence && (
+                <div style={{ display: "flex", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                  {[["edit", "✏️ Edit"], ["preview", "👁 Preview"]].map(([m, label]) => (
+                    <button key={m} onClick={() => setViewMode(m)} style={{
+                      padding: "5px 10px", fontSize: 11, fontWeight: 600, border: "none", cursor: "pointer",
+                      background: viewMode === m ? "var(--accent)" : "transparent",
+                      color: viewMode === m ? "#fff" : "var(--muted)",
+                      fontFamily: "var(--font)", transition: "all .15s",
+                    }}>{label}</button>
+                  ))}
+                </div>
+              )}
+              {sequence && (
+                <Btn variant="ghost" size="sm" onClick={copyAll}>
+                  {copied === "all" ? "✅ Copied!" : "📋 Copy All 4"}
+                </Btn>
+              )}
+              <Btn onClick={generateSequence} disabled={!selected || generating} style={{ minWidth: 155 }}>
+                {generating ? <><Spinner size={14} />Writing all 4...</> : sequence ? "🔄 Regenerate All" : "✨ Generate Sequence"}
+              </Btn>
+            </div>
           </div>
-          {!selected && <div style={{ textAlign:"center", padding:"40px 20px", color:"var(--muted)" }}><div style={{ fontSize:32, marginBottom:8 }}>👈</div>Select a lead from the left</div>}
-          {selected && !genEmail && !generating && <div style={{ textAlign:"center", padding:"40px 20px", color:"var(--muted)" }}><div style={{ fontSize:32, marginBottom:8 }}>✨</div>Click Generate to craft a personalized email</div>}
-          {generating && <div style={{ textAlign:"center", padding:"40px 20px" }}><Spinner size={28}/><div style={{ color:"var(--muted)", marginTop:12 }}>Claude is writing...</div></div>}
-          {genError && !generating && <div style={{ background:"#fef2f2", border:"1px solid #fecaca", borderRadius:8, padding:"12px 16px", fontSize:13, color:"#dc2626" }}>❌ {genError}</div>}
-          {genEmail && !generating && (
-            <div style={{ animation:"fadeIn .3s ease" }}>
-              <div style={{ marginBottom:12 }}>
-                <Label>Subject</Label>
-                <div style={{ background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:6, padding:"9px 12px", fontSize:13, fontWeight:600 }}>{genEmail.subject}</div>
+
+          {/* Body */}
+          <div style={{ padding: "18px 20px", flex: 1 }}>
+            {!selected && (
+              <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--muted)" }}>
+                <div style={{ fontSize: 36, marginBottom: 10 }}>👈</div>
+                <div style={{ fontWeight: 600 }}>Select a lead to get started</div>
+                <div style={{ fontSize: 12, marginTop: 6 }}>Generates all 4 emails at once, personalized to their role</div>
               </div>
-              <div>
-                <Label>Body</Label>
-                <div style={{ background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:6, padding:"12px 14px", fontSize:12, lineHeight:1.8, whiteSpace:"pre-wrap", maxHeight:240, overflowY:"auto", fontFamily:"var(--mono)" }}>{genEmail.body}</div>
+            )}
+
+            {selected && !sequence && !generating && !genError && (
+              <div style={{ textAlign: "center", padding: "50px 20px", color: "var(--muted)" }}>
+                <div style={{ fontSize: 36, marginBottom: 10 }}>✨</div>
+                <div style={{ fontWeight: 700, fontSize: 15, color: "var(--text)", marginBottom: 8 }}>Ready to generate for {selected.first_name || selected.company_name}</div>
+                <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                  All 4 emails personalized to their <strong>{selected.job_title}</strong> hire at <strong>{selected.company_name}</strong><br/>
+                  Tone: <strong>{tone}</strong> · Use the selector above to change
+                </div>
+                <div style={{ marginTop: 20 }}>
+                  <Btn onClick={generateSequence} style={{ minWidth: 200 }}>✨ Generate 4-Email Sequence</Btn>
+                </div>
               </div>
-              <div style={{ display:"flex", gap:8, marginTop:12 }}>
-                <Btn variant="ghost" size="sm" onClick={()=>navigator.clipboard?.writeText(`Subject: ${genEmail.subject}\n\n${genEmail.body}`)}>📋 Copy</Btn>
-                <Btn variant="success" size="sm">📤 Add to Sequence</Btn>
+            )}
+
+            {generating && (
+              <div style={{ textAlign: "center", padding: "60px 20px" }}>
+                <Spinner size={32} />
+                <div style={{ color: "var(--muted)", marginTop: 14, fontWeight: 600 }}>Writing your 4-email sequence...</div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>Personalizing for {selected?.company_name} · Tone: {tone}</div>
               </div>
-            </div>
-          )}
+            )}
+
+            {genError && !generating && (
+              <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#dc2626", marginBottom: 12 }}>❌ {genError}</div>
+            )}
+
+            {activeEmail && !generating && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 14, animation: "fadeIn .25s ease" }}>
+
+                {viewMode === "preview" ? (
+                  // Preview mode — show email as it would appear
+                  renderPreview(activeEmail, activeStep)
+                ) : (
+                  // Edit mode
+                  <>
+                    {/* Step header with regen button */}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 18 }}>{step.icon}</span>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 13, color: step.color }}>{step.label}</div>
+                          <div style={{ fontSize: 11, color: "var(--muted)" }}>{step.day} · {wordCount(activeEmail.body)} words</div>
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <Btn variant="ghost" size="sm" onClick={() => regenerateStep(activeStep)} disabled={regenStep === activeStep}>
+                          {regenStep === activeStep ? <><Spinner size={12} />Rewriting...</> : "🔄 Regen Step"}
+                        </Btn>
+                        <Btn variant="ghost" size="sm" onClick={() => copyStep(activeStep)}>
+                          {copied === activeStep ? "✅ Copied!" : "📋 Copy"}
+                        </Btn>
+                      </div>
+                    </div>
+
+                    {/* Subject */}
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                        <Label>Subject Line</Label>
+                        {activeEmail.altSubject && (
+                          <button onClick={() => useAltSubject(activeStep)} style={{
+                            fontSize: 11, color: "var(--accent)", background: "none", border: "none",
+                            cursor: "pointer", fontFamily: "var(--font)", fontWeight: 600, padding: 0,
+                          }}>⇄ Try alt: "{activeEmail.altSubject}"</button>
+                        )}
+                      </div>
+                      <input
+                        value={activeEmail.subject || ""}
+                        onChange={e => updateEmail(activeStep, "subject", e.target.value)}
+                        style={{
+                          width: "100%", background: "var(--surface2)", border: "1px solid var(--border)",
+                          borderRadius: 7, padding: "9px 12px", fontSize: 13, fontWeight: 600,
+                          color: "var(--text)", fontFamily: "var(--font)", outline: "none", boxSizing: "border-box",
+                        }}
+                      />
+                    </div>
+
+                    {/* Body */}
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                        <Label>Email Body</Label>
+                        <span style={{ fontSize: 11, color: wordCount(activeEmail.body) > 80 ? "var(--warn)" : "var(--accent3)", fontWeight: 600 }}>
+                          {wordCount(activeEmail.body)} words
+                        </span>
+                      </div>
+                      <textarea
+                        value={activeEmail.body || ""}
+                        onChange={e => updateEmail(activeStep, "body", e.target.value)}
+                        rows={8}
+                        style={{
+                          width: "100%", background: "var(--surface2)", border: "1px solid var(--border)",
+                          borderRadius: 7, padding: "12px 14px", fontSize: 13, lineHeight: 1.75,
+                          color: "var(--text)", fontFamily: "var(--font)", outline: "none",
+                          resize: "vertical", boxSizing: "border-box",
+                        }}
+                      />
+                    </div>
+
+                    {/* PS Line (step 1 only) */}
+                    {activeStep === 0 && (
+                      <div>
+                        <Label>P.S. Line (optional — shown at bottom of email)</Label>
+                        <input
+                          value={activeEmail.psLine || ""}
+                          onChange={e => updateEmail(activeStep, "psLine", e.target.value)}
+                          placeholder="e.g. P.S. We can have a shortlist ready for you in 48h..."
+                          style={{
+                            width: "100%", background: "var(--surface2)", border: "1px solid var(--border)",
+                            borderRadius: 7, padding: "9px 12px", fontSize: 12, fontStyle: "italic",
+                            color: "var(--text)", fontFamily: "var(--font)", outline: "none", boxSizing: "border-box",
+                          }}
+                        />
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* Step nav */}
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", paddingTop: 4, borderTop: "1px solid var(--border)", marginTop: 4 }}>
+                  {STEPS.map((s, i) => (
+                    <button key={i} onClick={() => setActiveStep(i)} style={{
+                      padding: "5px 12px", borderRadius: 20, fontSize: 11, fontWeight: 600,
+                      border: `1px solid ${activeStep === i ? s.color : "var(--border)"}`,
+                      background: activeStep === i ? `${s.color}15` : "var(--surface)",
+                      color: activeStep === i ? s.color : "var(--muted)",
+                      cursor: "pointer", fontFamily: "var(--font)", transition: "all .15s",
+                    }}>{s.icon} {s.label}</button>
+                  ))}
+                  <Btn variant="success" size="sm" style={{ marginLeft: "auto" }}>📤 Add to Instantly</Btn>
+                </div>
+              </div>
+            )}
+          </div>
         </Card>
       </div>
     </div>
@@ -1098,24 +1467,24 @@ function SettingsView({ settings, onSave }) {
   const [deployLog, setDeployLog] = useState([]);
   const [deployResult, setDeployResult] = useState(null);
   // Track what's actually persisted in localStorage (for status indicator)
-  const [savedUrl, setSavedUrl] = useState(LS.get("hr_azure_url", ""));
-
   const save = () => {
     onSave(local);
     setSaved(true);
-    setSavedUrl(local.azureFunctionUrl || "");
     setTimeout(()=>setSaved(false), 2000);
   };
 
   const deployToGitHub = async () => {
-    const azureUrl = local.azureFunctionUrl;
-    const deploySecret = local.deploySecret;
-    if (!azureUrl) { alert("Add your Azure Function URL in the Deploy section below first"); return; }
+    const githubToken = local.githubToken;
+    const owner = "csharptek";
 
-    // Check if Claude has pre-loaded new file content
+    if (!githubToken) {
+      alert("Add your GitHub token in Settings → Deploy section first.");
+      return;
+    }
+
     const pendingFiles = window.__HIRERAD_PENDING_DEPLOY__ || [];
     if (!pendingFiles.length) {
-      alert("No updates pending. Claude will pre-load new files before asking you to deploy.");
+      alert("No updates pending. Claude will pre-load files before asking you to deploy.");
       return;
     }
 
@@ -1124,37 +1493,50 @@ function SettingsView({ settings, onSave }) {
     setDeployResult(null);
     const log = (msg, type="default") => setDeployLog(l => [...l, { msg, type, time: new Date().toLocaleTimeString() }]);
 
-    log(`🚀 Deploying ${pendingFiles.length} file(s) to GitHub...`, "accent");
-    pendingFiles.forEach(f => log(`📦 ${f.repo} → ${f.path}`, "default"));
+    log(`🚀 Deploying ${pendingFiles.length} file(s) directly to GitHub...`, "accent");
+    pendingFiles.forEach(f => log(`📦 ${f.repo}/${f.path}`, "default"));
 
-    try {
-      const headers = { "Content-Type": "application/json" };
-      if (deploySecret) headers["x-deploy-secret"] = deploySecret;
+    const results = [];
+    for (const file of pendingFiles) {
+      const { repo, path, branch = "main", content } = file;
+      const apiBase = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+      const headers = {
+        "Authorization": `token ${githubToken}`,
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+      };
+      try {
+        // Get current SHA
+        let sha = null;
+        const getRes = await fetch(`${apiBase}?ref=${branch}`, { headers });
+        if (getRes.ok) { const d = await getRes.json(); sha = d.sha; }
 
-      const res = await fetch(azureUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ files: pendingFiles }),
-      });
+        // Commit
+        const body = {
+          message: `deploy: update ${path} [${new Date().toISOString()}]`,
+          content: btoa(unescape(encodeURIComponent(content))),
+          branch,
+          ...(sha ? { sha } : {}),
+        };
+        const putRes = await fetch(apiBase, { method: "PUT", headers, body: JSON.stringify(body) });
+        const putData = await putRes.json();
+        if (!putRes.ok) throw new Error(putData.message || putRes.status);
 
-      const data = await res.json();
-
-      if (data.success) {
-        data.results.forEach(r => log(`✅ ${r.path} committed (${r.commit})`, "success"));
-        log("🎉 Done! Vercel + Railway deploying in ~60s", "success");
-        setDeployResult({ success: true, results: data.results });
-        window.__HIRERAD_PENDING_DEPLOY__ = []; // clear after success
-      } else {
-        data.results?.forEach(r => {
-          if (r.status === "success") log(`✅ ${r.path} deployed`, "success");
-          else log(`❌ ${r.path}: ${r.error}`, "error");
-        });
-        setDeployResult({ success: false });
+        const commit = putData.commit?.sha?.slice(0, 7);
+        log(`✅ ${repo}/${path} → committed ${commit}`, "success");
+        results.push({ path, status: "success", commit });
+      } catch (err) {
+        log(`❌ ${repo}/${path}: ${err.message}`, "error");
+        results.push({ path, status: "error", error: err.message });
       }
-    } catch(err) {
-      log(`❌ Deploy failed: ${err.message}`, "error");
-      setDeployResult({ success: false });
     }
+
+    const allOk = results.every(r => r.status === "success");
+    if (allOk) {
+      log("🎉 All files committed! Vercel + Railway deploying in ~60s", "success");
+      window.__HIRERAD_PENDING_DEPLOY__ = [];
+    }
+    setDeployResult({ success: allOk, results });
     setDeploying(false);
   };
 
@@ -1197,9 +1579,10 @@ function SettingsView({ settings, onSave }) {
         <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
           {[
             ["Backend API", `${API_BASE.replace("/api","")}`, "🟢"],
-            ["Apollo.io",   local.apolloKey  ? "Key configured ✓" : "Not configured", local.apolloKey  ? "🟢" : "🔴"],
-            ["Apify",       local.apifyKey   ? "Key configured ✓" : "Not configured", local.apifyKey   ? "🟢" : "🔴"],
-            ["Instantly",   local.instantlyKey?"Key configured ✓" : "Not configured", local.instantlyKey?"🟢" : "🔴"],
+            ["Apollo.io",   local.apolloKey   ? "Key configured ✓" : "Not configured", local.apolloKey   ? "🟢" : "🔴"],
+            ["Apify",       local.apifyKey    ? "Key configured ✓" : "Not configured", local.apifyKey    ? "🟢" : "🔴"],
+            ["Instantly",   local.instantlyKey? "Key configured ✓" : "Not configured", local.instantlyKey? "🟢" : "🔴"],
+            ["GitHub Token",local.githubToken ? "Token configured ✓": "Not configured", local.githubToken ? "🟢" : "🔴"],
           ].map(([name,val,icon])=>(
             <div key={name} style={{ display:"flex", justifyContent:"space-between", padding:"10px 14px", background:"var(--surface2)", borderRadius:8, fontSize:13 }}>
               <span style={{ fontWeight:600 }}>{icon} {name}</span>
@@ -1210,46 +1593,39 @@ function SettingsView({ settings, onSave }) {
       </Card>
 
       <Card>
-        <div style={{ fontWeight:700, fontSize:15, marginBottom:4 }}>⚙️ Azure Auto-Deploy</div>
+        <div style={{ fontWeight:700, fontSize:15, marginBottom:4 }}>🚀 GitHub Auto-Deploy</div>
         <p style={{ color:"var(--muted)", fontSize:12, marginBottom:16 }}>
-          Push code changes directly to GitHub → triggers Vercel & Railway auto-deploy
+          Claude pushes code directly to GitHub → triggers Vercel & Railway auto-deploy
         </p>
 
-        <div style={{ marginBottom:12 }}>
-          <Label>Azure Function URL</Label>
-          <Input
-            type="text"
-            placeholder="https://your-function.azurewebsites.net/api/deploy"
-            value={local.azureFunctionUrl||""}
-            onChange={e=>setLocal(p=>({...p,azureFunctionUrl:e.target.value}))}
-          />
-        </div>
         <div style={{ marginBottom:16 }}>
-          <Label>Deploy Secret (optional)</Label>
+          <Label>GitHub Personal Access Token</Label>
           <Input
             type="password"
-            placeholder="Your x-deploy-secret value"
-            value={local.deploySecret||""}
-            onChange={e=>setLocal(p=>({...p,deploySecret:e.target.value}))}
+            placeholder="github_pat_... (needs repo scope)"
+            value={local.githubToken||""}
+            onChange={e=>setLocal(p=>({...p,githubToken:e.target.value}))}
           />
+          <div style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>
+            Generate at github.com/settings/tokens → Fine-grained or Classic with <code>repo</code> scope
+          </div>
         </div>
 
-        {/* Save Deploy Settings button */}
         <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:20, paddingBottom:20, borderBottom:"1px solid var(--border)" }}>
           <Btn variant="outline" onClick={save} style={{ minWidth:180 }}>
-            {saved ? "✅ Saved!" : "💾 Save Deploy Settings"}
+            {saved ? "✅ Saved!" : "💾 Save Settings"}
           </Btn>
           <div style={{ fontSize:12 }}>
-            {savedUrl
-              ? <span style={{ color:"#16a34a", fontWeight:600 }}>✓ URL saved · persists on reload</span>
-              : <span style={{ color:"var(--danger)" }}>⚠ Enter Azure Function URL above then save</span>}
+            {local.githubToken
+              ? <span style={{ color:"#16a34a", fontWeight:600 }}>✓ Token saved · deploy ready</span>
+              : <span style={{ color:"var(--danger)" }}>⚠ Add GitHub token above to enable deploy</span>}
           </div>
         </div>
 
         <PendingDeployStatus />
 
         <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:16 }}>
-          <Btn onClick={deployToGitHub} disabled={deploying||!local.azureFunctionUrl} variant="success" style={{ minWidth:180 }}>
+          <Btn onClick={deployToGitHub} disabled={deploying||!local.githubToken} variant="success" style={{ minWidth:180 }}>
             {deploying
               ? <><Spinner size={14}/>Deploying...</>
               : "🚀 Deploy to GitHub"}
@@ -1308,16 +1684,14 @@ export default function App() {
     apolloKey:        LS.get("hr_apollo"),
     apifyKey:         LS.get("hr_apify"),
     instantlyKey:     LS.get("hr_instantly"),
-    azureFunctionUrl: LS.get("hr_azure_url"),
-    deploySecret:     LS.get("hr_deploy_secret"),
+    githubToken:      LS.get("hr_github_token"),
   }));
 
   const saveSettings = (s) => {
-    LS.set("hr_apollo",    s.apolloKey         || "");
-    LS.set("hr_apify",     s.apifyKey          || "");
-    LS.set("hr_instantly", s.instantlyKey      || "");
-    LS.set("hr_azure_url", s.azureFunctionUrl  || "");
-    LS.set("hr_deploy_secret", s.deploySecret  || "");
+    LS.set("hr_apollo",        s.apolloKey       || "");
+    LS.set("hr_apify",         s.apifyKey        || "");
+    LS.set("hr_instantly",     s.instantlyKey    || "");
+    LS.set("hr_github_token",  s.githubToken     || "");
     setSettings(s);
   };
 
@@ -1421,6 +1795,7 @@ export default function App() {
         <div style={{ display:"flex", alignItems:"center", gap:8, marginRight:8 }}>
           <div style={{ width:28, height:28, borderRadius:7, background:"linear-gradient(135deg,var(--accent),var(--accent2))", display:"flex", alignItems:"center", justifyContent:"center", fontSize:15 }}>⚡</div>
           <span style={{ fontWeight:800, fontSize:15, letterSpacing:-.3, color:"var(--text)" }}>HireRadar</span>
+          <span style={{ fontSize:10, fontWeight:700, background:"var(--accent)", color:"#fff", borderRadius:4, padding:"1px 5px", fontFamily:"var(--mono)", marginLeft:2 }}>v1.1</span>
         </div>
         <nav style={{ display:"flex", gap:2 }}>
           {NAV.map(n => (
