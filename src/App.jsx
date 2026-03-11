@@ -41,7 +41,33 @@ async function apiFetch(path, opts = {}) {
   return res.json();
 }
 
-async function callClaude(systemPrompt, userPrompt) {
+async function callClaude(systemPrompt, userPrompt, azureSettings = null) {
+  // If Azure OpenAI is configured, call it directly from the browser
+  if (azureSettings?.azureOpenAiEndpoint && azureSettings?.azureOpenAiKey && azureSettings?.azureOpenAiDeployment) {
+    const { azureOpenAiEndpoint, azureOpenAiKey, azureOpenAiDeployment, azureOpenAiApiVersion = "2024-02-01" } = azureSettings;
+    const endpoint = azureOpenAiEndpoint.replace(/\/$/, "");
+    const url = `${endpoint}/openai/deployments/${azureOpenAiDeployment}/chat/completions?api-version=${azureOpenAiApiVersion}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "api-key": azureOpenAiKey },
+      body: JSON.stringify({
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user",   content: userPrompt },
+        ],
+        max_tokens: 2000,
+        temperature: 0.8,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || `Azure OpenAI error ${res.status}`);
+    const text = data.choices?.[0]?.message?.content || "";
+    // Parse JSON from the response
+    const clean = text.replace(/```json|```/g, "").trim();
+    return JSON.parse(clean);
+  }
+
+  // Fallback: Anthropic via backend
   const res = await fetch(`${API_BASE}/generate-email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1038,7 +1064,7 @@ ${STEPS.map((s, i) => `Step ${i + 1} (${s.label}, ${s.day}): ${s.instruction}`).
 Return exactly 4 email objects. No other text.`;
 
     try {
-      const result = await callClaude(systemPrompt, userPrompt);
+      const result = await callClaude(systemPrompt, userPrompt, settings);
       let emails = result;
       if (result && result.content) {
         const text = Array.isArray(result.content)
@@ -1074,7 +1100,7 @@ Step instruction: ${s.instruction}
 Return exactly 1 email object. No other text.`;
 
     try {
-      const result = await callClaude(systemPrompt, userPrompt);
+      const result = await callClaude(systemPrompt, userPrompt, settings);
       let email = result;
       if (result && result.content) {
         const text = Array.isArray(result.content)
@@ -1460,17 +1486,28 @@ Return exactly 1 email object. No other text.`;
 }
 
 /* ─── Settings View (with all API keys + save) ───────────────────────────── */
-function SettingsView({ settings, onSave }) {
+function SettingsView({ settings, onSave, settingsLoaded }) {
   const [local, setLocal] = useState({ ...settings });
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+
+  // Sync if settings loaded from DB after mount
+  useEffect(() => {
+    setLocal({ ...settings });
+  }, [settingsLoaded]);
   const [deploying, setDeploying] = useState(false);
   const [deployLog, setDeployLog] = useState([]);
   const [deployResult, setDeployResult] = useState(null);
   // Track what's actually persisted in localStorage (for status indicator)
-  const save = () => {
-    onSave(local);
-    setSaved(true);
-    setTimeout(()=>setSaved(false), 2000);
+  const save = async () => {
+    setSaveError(null);
+    try {
+      await onSave(local);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (err) {
+      setSaveError("Save failed: " + err.message);
+    }
   };
 
   const deployToGitHub = async () => {
@@ -1558,9 +1595,16 @@ function SettingsView({ settings, onSave }) {
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }} className="slide-in">
-      <div>
-        <h2 style={{ fontSize:22, fontWeight:800 }}>Settings</h2>
-        <p style={{ color:"var(--muted)", fontSize:13, marginTop:4 }}>API keys are saved in your browser and persist across sessions</p>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+        <div>
+          <h2 style={{ fontSize:22, fontWeight:800 }}>Settings</h2>
+          <p style={{ color:"var(--muted)", fontSize:13, marginTop:4 }}>API keys are saved to the database and sync across devices</p>
+        </div>
+        {!settingsLoaded && (
+          <div style={{ display:"flex", alignItems:"center", gap:8, fontSize:12, color:"var(--muted)" }}>
+            <Spinner size={14} /> Loading from database...
+          </div>
+        )}
       </div>
 
       <Card>
@@ -1572,17 +1616,101 @@ function SettingsView({ settings, onSave }) {
         <Btn onClick={save} style={{ marginTop:4 }}>
           {saved ? "✅ Saved!" : "💾 Save API Keys"}
         </Btn>
+        {saveError && <div style={{ marginTop:8, color:"var(--danger)", fontSize:12 }}>{saveError}</div>}
+      </Card>
+
+      <Card style={{ border: "1px solid #bfdbfe", background: "#f0f7ff" }}>
+        <div style={{ fontWeight:700, fontSize:15, marginBottom:4, color:"#1d4ed8" }}>🤖 Azure OpenAI — Email Generator</div>
+        <p style={{ color:"var(--muted)", fontSize:12, marginBottom:16 }}>
+          When configured, email sequences will be generated using your Azure OpenAI deployment directly from the browser.
+          Leave blank to use the Anthropic backend instead.
+        </p>
+
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+          <div style={{ gridColumn:"1 / -1" }}>
+            <Label>Azure OpenAI Endpoint</Label>
+            <input
+              type="text"
+              placeholder="https://YOUR-RESOURCE.openai.azure.com"
+              value={local.azureOpenAiEndpoint || ""}
+              onChange={e => setLocal(p => ({ ...p, azureOpenAiEndpoint: e.target.value }))}
+              style={{ width:"100%", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:8, padding:"9px 12px", color:"var(--text)", fontFamily:"var(--mono)", fontSize:13, outline:"none", boxSizing:"border-box" }}
+              onFocus={e=>e.target.style.borderColor="var(--accent)"}
+              onBlur={e=>e.target.style.borderColor="var(--border)"}
+            />
+            <div style={{ fontSize:11, color:"var(--muted)", marginTop:3 }}>
+              Found in Azure Portal → Your OpenAI resource → Keys and Endpoint
+            </div>
+          </div>
+
+          <div>
+            <Label>API Key</Label>
+            <input
+              type="password"
+              placeholder="Azure OpenAI Key 1 or Key 2"
+              value={local.azureOpenAiKey || ""}
+              onChange={e => setLocal(p => ({ ...p, azureOpenAiKey: e.target.value }))}
+              style={{ width:"100%", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:8, padding:"9px 12px", color:"var(--text)", fontFamily:"var(--mono)", fontSize:13, outline:"none", boxSizing:"border-box" }}
+              onFocus={e=>e.target.style.borderColor="var(--accent)"}
+              onBlur={e=>e.target.style.borderColor="var(--border)"}
+            />
+          </div>
+
+          <div>
+            <Label>Deployment Name</Label>
+            <input
+              type="text"
+              placeholder="e.g. gpt-4o or gpt-35-turbo"
+              value={local.azureOpenAiDeployment || ""}
+              onChange={e => setLocal(p => ({ ...p, azureOpenAiDeployment: e.target.value }))}
+              style={{ width:"100%", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:8, padding:"9px 12px", color:"var(--text)", fontFamily:"var(--mono)", fontSize:13, outline:"none", boxSizing:"border-box" }}
+              onFocus={e=>e.target.style.borderColor="var(--accent)"}
+              onBlur={e=>e.target.style.borderColor="var(--border)"}
+            />
+            <div style={{ fontSize:11, color:"var(--muted)", marginTop:3 }}>
+              Azure Portal → Your OpenAI resource → Model deployments
+            </div>
+          </div>
+
+          <div>
+            <Label>API Version</Label>
+            <input
+              type="text"
+              placeholder="2024-02-01"
+              value={local.azureOpenAiApiVersion || "2024-02-01"}
+              onChange={e => setLocal(p => ({ ...p, azureOpenAiApiVersion: e.target.value }))}
+              style={{ width:"100%", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:8, padding:"9px 12px", color:"var(--text)", fontFamily:"var(--mono)", fontSize:13, outline:"none", boxSizing:"border-box" }}
+              onFocus={e=>e.target.style.borderColor="var(--accent)"}
+              onBlur={e=>e.target.style.borderColor="var(--border)"}
+            />
+            <div style={{ fontSize:11, color:"var(--muted)", marginTop:3 }}>
+              Default: 2024-02-01 — check Azure docs for latest
+            </div>
+          </div>
+        </div>
+
+        {/* Status indicator */}
+        <div style={{ marginTop:16, padding:"10px 14px", borderRadius:8, background: local.azureOpenAiEndpoint && local.azureOpenAiKey && local.azureOpenAiDeployment ? "#dcfce7" : "#fef9c3", border: `1px solid ${local.azureOpenAiEndpoint && local.azureOpenAiKey && local.azureOpenAiDeployment ? "#16a34a30" : "#ca8a0430"}`, fontSize:12, fontWeight:600, color: local.azureOpenAiEndpoint && local.azureOpenAiKey && local.azureOpenAiDeployment ? "#16a34a" : "#92400e" }}>
+          {local.azureOpenAiEndpoint && local.azureOpenAiKey && local.azureOpenAiDeployment
+            ? `✅ Azure OpenAI configured — using deployment "${local.azureOpenAiDeployment}"`
+            : "⚠️ Fill in all 3 fields above to enable Azure OpenAI. Missing fields will fall back to Anthropic backend."}
+        </div>
+
+        <Btn onClick={save} style={{ marginTop:14 }}>
+          {saved ? "✅ Saved!" : "💾 Save Azure Settings"}
+        </Btn>
       </Card>
 
       <Card>
         <div style={{ fontWeight:700, fontSize:15, marginBottom:12 }}>🔗 System Status</div>
         <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
           {[
-            ["Backend API", `${API_BASE.replace("/api","")}`, "🟢"],
-            ["Apollo.io",   local.apolloKey   ? "Key configured ✓" : "Not configured", local.apolloKey   ? "🟢" : "🔴"],
-            ["Apify",       local.apifyKey    ? "Key configured ✓" : "Not configured", local.apifyKey    ? "🟢" : "🔴"],
-            ["Instantly",   local.instantlyKey? "Key configured ✓" : "Not configured", local.instantlyKey? "🟢" : "🔴"],
-            ["GitHub Token",local.githubToken ? "Token configured ✓": "Not configured", local.githubToken ? "🟢" : "🔴"],
+            ["Backend API",       `${API_BASE.replace("/api","")}`,                                               "🟢"],
+            ["Apollo.io",         local.apolloKey          ? "Key configured ✓"  : "Not configured",             local.apolloKey          ? "🟢" : "🔴"],
+            ["Apify",             local.apifyKey           ? "Key configured ✓"  : "Not configured",             local.apifyKey           ? "🟢" : "🔴"],
+            ["Instantly",         local.instantlyKey       ? "Key configured ✓"  : "Not configured",             local.instantlyKey       ? "🟢" : "🔴"],
+            ["Azure OpenAI",      local.azureOpenAiEndpoint && local.azureOpenAiKey && local.azureOpenAiDeployment ? `Deployment: ${local.azureOpenAiDeployment} ✓` : "Not configured — will use Anthropic", local.azureOpenAiEndpoint && local.azureOpenAiKey && local.azureOpenAiDeployment ? "🟢" : "🟡"],
+            ["GitHub Token",      local.githubToken        ? "Token configured ✓": "Not configured",             local.githubToken        ? "🟢" : "🔴"],
           ].map(([name,val,icon])=>(
             <div key={name} style={{ display:"flex", justifyContent:"space-between", padding:"10px 14px", background:"var(--surface2)", borderRadius:8, fontSize:13 }}>
               <span style={{ fontWeight:600 }}>{icon} {name}</span>
@@ -1679,19 +1807,67 @@ export default function App() {
   const [enriching, setEnrich] = useState(null);
   const [backendOk, setBackend] = useState(null);
 
-  // Load API keys from localStorage
+  // Load API keys from database (with localStorage fallback while loading)
   const [settings, setSettings] = useState(() => ({
-    apolloKey:        LS.get("hr_apollo"),
-    apifyKey:         LS.get("hr_apify"),
-    instantlyKey:     LS.get("hr_instantly"),
-    githubToken:      LS.get("hr_github_token"),
+    apolloKey:             LS.get("hr_apollo"),
+    apifyKey:              LS.get("hr_apify"),
+    instantlyKey:          LS.get("hr_instantly"),
+    githubToken:           LS.get("hr_github_token"),
+    azureOpenAiEndpoint:   LS.get("hr_azure_oai_endpoint"),
+    azureOpenAiKey:        LS.get("hr_azure_oai_key"),
+    azureOpenAiDeployment: LS.get("hr_azure_oai_deployment"),
+    azureOpenAiApiVersion: LS.get("hr_azure_oai_api_version") || "2024-02-01",
   }));
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
 
-  const saveSettings = (s) => {
-    LS.set("hr_apollo",        s.apolloKey       || "");
-    LS.set("hr_apify",         s.apifyKey        || "");
-    LS.set("hr_instantly",     s.instantlyKey    || "");
-    LS.set("hr_github_token",  s.githubToken     || "");
+  // Load settings from DB on mount
+  useEffect(() => {
+    apiFetch("/settings")
+      .then(data => {
+        const merged = {
+          apolloKey:             data.apolloKey             || "",
+          apifyKey:              data.apifyKey              || "",
+          instantlyKey:          data.instantlyKey          || "",
+          githubToken:           data.githubToken           || "",
+          azureOpenAiEndpoint:   data.azureOpenAiEndpoint   || "",
+          azureOpenAiKey:        data.azureOpenAiKey        || "",
+          azureOpenAiDeployment: data.azureOpenAiDeployment || "",
+          azureOpenAiApiVersion: data.azureOpenAiApiVersion || "2024-02-01",
+        };
+        setSettings(merged);
+        // Also mirror to localStorage for offline/fast-load
+        LS.set("hr_apollo",                merged.apolloKey);
+        LS.set("hr_apify",                 merged.apifyKey);
+        LS.set("hr_instantly",             merged.instantlyKey);
+        LS.set("hr_github_token",          merged.githubToken);
+        LS.set("hr_azure_oai_endpoint",    merged.azureOpenAiEndpoint);
+        LS.set("hr_azure_oai_key",         merged.azureOpenAiKey);
+        LS.set("hr_azure_oai_deployment",  merged.azureOpenAiDeployment);
+        LS.set("hr_azure_oai_api_version", merged.azureOpenAiApiVersion);
+      })
+      .catch(() => { /* backend down — use localStorage values */ })
+      .finally(() => setSettingsLoaded(true));
+  }, []);
+
+  const saveSettings = async (s) => {
+    // Save to DB first
+    try {
+      await apiFetch("/settings", {
+        method: "PUT",
+        body: JSON.stringify(s),
+      });
+    } catch (err) {
+      console.warn("Could not save settings to DB:", err.message);
+    }
+    // Mirror to localStorage as fallback
+    LS.set("hr_apollo",                s.apolloKey              || "");
+    LS.set("hr_apify",                 s.apifyKey               || "");
+    LS.set("hr_instantly",             s.instantlyKey           || "");
+    LS.set("hr_github_token",          s.githubToken            || "");
+    LS.set("hr_azure_oai_endpoint",    s.azureOpenAiEndpoint    || "");
+    LS.set("hr_azure_oai_key",         s.azureOpenAiKey         || "");
+    LS.set("hr_azure_oai_deployment",  s.azureOpenAiDeployment  || "");
+    LS.set("hr_azure_oai_api_version", s.azureOpenAiApiVersion  || "2024-02-01");
     setSettings(s);
   };
 
@@ -1831,7 +2007,7 @@ export default function App() {
         {view==="leads"     && <LeadsView leads={leads} onEnrich={handleEnrich} enriching={enriching} onClearDb={handleClearDb} backendOk={backendOk} />}
         {view==="apollo"    && <ApolloView settings={settings} leads={leads} />}
         {view==="campaigns" && <CampaignView leads={leads} backendOk={backendOk} settings={settings} />}
-        {view==="settings"  && <SettingsView settings={settings} onSave={saveSettings} />}
+        {view==="settings"  && <SettingsView settings={settings} onSave={saveSettings} settingsLoaded={settingsLoaded} />}
       </main>
     </div>
   );
