@@ -48,16 +48,14 @@ async function callClaude(systemPrompt, userPrompt, azureSettings = null) {
     const endpoint = azureOpenAiEndpoint.replace(/\/$/, "");
     const url = `${endpoint}/openai/deployments/${azureOpenAiDeployment}/chat/completions?api-version=${azureOpenAiApiVersion}`;
 
-    // Newer Azure models (gpt-4o, o1, o3, etc.) use max_completion_tokens instead of max_tokens.
-    // Reasoning models (o1, o3, o1-mini) also don't support the temperature parameter.
-    const isReasoningModel = /^o\d/i.test(azureOpenAiDeployment.trim());
+    // Modern Azure OpenAI models use max_completion_tokens (not max_tokens).
+    // temperature must be omitted entirely — only the default (1) is supported.
     const requestBody = {
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user",   content: userPrompt },
       ],
       max_completion_tokens: 2000,
-      ...(isReasoningModel ? {} : { temperature: 0.8 }),
     };
 
     const res = await fetch(url, {
