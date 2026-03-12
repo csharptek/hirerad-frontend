@@ -794,45 +794,19 @@ function ApolloView({ settings, leads }) {
     if (!nlName.trim()) { setNlError("Enter a person name"); return; }
     setNlSearching(true); setNlError(""); setNlResults([]);
     try {
-      const parts = nlName.trim().split(" ");
-      const body = {
-        first_name: parts[0] || "",
-        last_name:  parts.slice(1).join(" ") || "",
-        ...(nlLocation ? { person_locations: [nlLocation] } : {}),
-        reveal_personal_emails: true,
-        reveal_phone_number: true,
-      };
-      const res  = await fetch(`${API_BASE}/apollo/person`, { method:"POST", headers:proxyHeaders, body:JSON.stringify(body) });
+      // Use dedicated person-search endpoint (Apollo mixed_people/api_search)
+      // This works with just a name unlike people/match which needs company context
+      const res  = await fetch(`${API_BASE}/apollo/person-search`, {
+        method: "POST",
+        headers: proxyHeaders,
+        body: JSON.stringify({ name: nlName.trim(), location: nlLocation.trim() || null }),
+      });
       const data = await res.json();
-      if (data.person) {
-        const p = data.person;
-        setNlResults([{
-          apollo_id: p.id,
-          name:      `${p.first_name||""} ${p.last_name||""}`.trim(),
-          title:     p.title || "—",
-          company:   p.organization?.name || "—",
-          domain:    p.organization?.website_url || "",
-          email:     p.email || "",
-          phone:     p.phone_numbers?.[0]?.sanitized_number || p.sanitized_phone || "",
-          linkedin:  p.linkedin_url || "",
-          verified:  !!p.email,
-          location:  p.city ? [p.city, p.state, p.country].filter(Boolean).join(", ") : "",
-        }]);
-      } else if (data.people?.length) {
-        setNlResults(data.people.map(p => ({
-          apollo_id: p.id,
-          name:      p.name || `${p.first_name||""} ${p.last_name||""}`.trim(),
-          title:     p.title || "—",
-          company:   p.organization?.name || p.employment_history?.[0]?.organization_name || "—",
-          domain:    p.organization?.website_url || "",
-          email:     p.email || "",
-          phone:     p.phone_numbers?.[0]?.sanitized_number || "",
-          linkedin:  p.linkedin_url || "",
-          verified:  !!p.email,
-          location:  p.city ? [p.city, p.state, p.country].filter(Boolean).join(", ") : "",
-        })));
+      if (!res.ok) throw new Error(data.error || "Search failed");
+      if (data.people?.length) {
+        setNlResults(data.people);
       } else {
-        setNlError("No results found. Try a different name or location.");
+        setNlError("No results found. Try a broader name or remove the location filter.");
       }
     } catch(err) { setNlError(err.message); }
     setNlSearching(false);
