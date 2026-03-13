@@ -776,6 +776,7 @@ function LeadsView({ leads, onEnrich, enriching, onClearDb, backendOk }) {
 
 /* ─── Apollo View ────────────────────────────────────────────────────────── */
 function ApolloView({ settings, leads }) {
+<<<<<<< HEAD
   const apolloKey    = settings.apolloKey;
   const proxyHeaders = { "Content-Type":"application/json", "x-apollo-key": apolloKey };
   const [mode, setMode] = useState("company"); // "company" | "person"
@@ -1036,13 +1037,190 @@ function ApolloView({ settings, leads }) {
       fontFamily:"var(--font)", transition:"all .15s", border:"1px solid var(--border)",
       background:mode===m?"var(--accent)":"var(--surface)", color:mode===m?"#fff":"var(--muted)", boxShadow:"var(--shadow)",
     }}>{icon} {label}</button>
+=======
+  // ── Mode: "name" = Name+Location lookup | "company" = Company people browser
+  const [mode, setMode]               = useState("company");
+  const apolloKey                     = settings.apolloKey;
+  const proxyHeaders                  = { "Content-Type":"application/json", "x-apollo-key": apolloKey };
+
+  // ── Name + Location lookup state ──────────────────────────────
+  const [nlName, setNlName]           = useState("");
+  const [nlLocation, setNlLocation]   = useState("");
+  const [nlSearching, setNlSearching] = useState(false);
+  const [nlResults, setNlResults]     = useState([]);
+  const [nlError, setNlError]         = useState("");
+  const [nlCopied, setNlCopied]       = useState(null);
+
+  const searchByName = async () => {
+    if (!apolloKey) { setNlError("Add Apollo.io API key in Settings"); return; }
+    if (!nlName.trim()) { setNlError("Enter a person name"); return; }
+    setNlSearching(true); setNlError(""); setNlResults([]);
+    try {
+      // Use dedicated person-search endpoint (Apollo mixed_people/api_search)
+      // This works with just a name unlike people/match which needs company context
+      const res  = await fetch(`${API_BASE}/apollo/person-search`, {
+        method: "POST",
+        headers: proxyHeaders,
+        body: JSON.stringify({ name: nlName.trim(), location: nlLocation.trim() || null }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Search failed");
+      if (data.people?.length) {
+        setNlResults(data.people);
+      } else {
+        setNlError("No results found. Try a broader name or remove the location filter.");
+      }
+    } catch(err) { setNlError(err.message); }
+    setNlSearching(false);
+  };
+
+  // ── Company people browser state ──────────────────────────────
+  const [companyName, setCompanyName] = useState("");
+  const [compSearching, setCompSearching] = useState(false);
+  const [compPeople, setCompPeople]   = useState([]);   // all people found
+  const [compOrg, setCompOrg]         = useState(null); // org info
+  const [compError, setCompError]     = useState("");
+  const [selected, setSelected]       = useState({});   // { idx: true }
+  const [enriching, setEnriching]     = useState({});   // { idx: true } — per-row loading
+  const [bulkEnriching, setBulkEnriching] = useState(false);
+  const [copied, setCopied]           = useState(null);
+
+  const searchCompanyPeople = async () => {
+    if (!apolloKey) { setCompError("Add Apollo.io API key in Settings"); return; }
+    if (!companyName.trim()) { setCompError("Enter a company name"); return; }
+    setCompSearching(true); setCompError(""); setCompPeople([]); setCompOrg(null); setSelected({});
+    try {
+      const res  = await fetch(`${API_BASE}/apollo/company-people`, {
+        method:"POST", headers:proxyHeaders,
+        body: JSON.stringify({ company_name: companyName.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Search failed");
+      setCompOrg(data.org || null);
+      setCompPeople(data.people || []);
+      if (!data.people?.length) setCompError("No people found for this company.");
+    } catch(err) { setCompError(err.message); }
+    setCompSearching(false);
+  };
+
+  // Enrich a single person by Apollo ID to get email + phone
+  const enrichPerson = async (idx) => {
+    const person = compPeople[idx];
+    if (!person?.apollo_id) return;
+    setEnriching(e => ({ ...e, [idx]: true }));
+    try {
+      const body = { id: person.apollo_id, reveal_personal_emails: true, reveal_phone_number: true };
+      const res  = await fetch(`${API_BASE}/apollo/person`, { method:"POST", headers:proxyHeaders, body:JSON.stringify(body) });
+      const data = await res.json();
+      const p    = data.person || {};
+      setCompPeople(prev => prev.map((row, i) => i !== idx ? row : {
+        ...row,
+        email:    p.email || row.email || "",
+        phone:    p.phone_numbers?.[0]?.sanitized_number || p.sanitized_phone || row.phone || "",
+        verified: !!p.email,
+        enriched: true,
+      }));
+    } catch(err) { /* silently fail */ }
+    setEnriching(e => ({ ...e, [idx]: false }));
+  };
+
+  // Enrich all selected (or all if none selected)
+  const enrichSelected = async () => {
+    const indices = Object.keys(selected).filter(k => selected[k]).map(Number);
+    const targets = indices.length ? indices : compPeople.map((_,i) => i);
+    setBulkEnriching(true);
+    for (const idx of targets) await enrichPerson(idx);
+    setBulkEnriching(false);
+  };
+
+  const toggleSelect = (idx) => setSelected(s => ({ ...s, [idx]: !s[idx] }));
+  const selectAll    = () => setSelected(compPeople.reduce((a,_,i) => ({ ...a, [i]: true }), {}));
+  const clearAll     = () => setSelected({});
+  const selectedCount = Object.values(selected).filter(Boolean).length;
+
+  const copyText = (text, key) => {
+    navigator.clipboard?.writeText(text);
+    setCopied(key);
+    setTimeout(() => setCopied(null), 1500);
+  };
+
+  // Shared person card renderer
+  const PersonCard = ({ p, i, showEnrich = false }) => (
+    <div style={{ background:"var(--surface2)", border:`1px solid ${p.enriched?"#86efac":"var(--border)"}`, borderRadius:10, padding:"14px 16px" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:8 }}>
+        <div style={{ flex:1 }}>
+          <div style={{ fontWeight:700, fontSize:14 }}>{p.name}</div>
+          <div style={{ color:"var(--muted)", fontSize:12, marginTop:2 }}>{p.title}{p.company && p.company !== "—" ? ` · ${p.company}` : ""}</div>
+          {p.location && <div style={{ color:"var(--muted)", fontSize:11, marginTop:2 }}>📍 {p.location}</div>}
+          {p.domain && <div style={{ color:"var(--muted)", fontSize:11, marginTop:2 }}>🌐 {p.domain}</div>}
+        </div>
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:4 }}>
+          {p.verified ? <Badge variant="success">✓ Email Found</Badge> : <Badge variant="warning">No Email Yet</Badge>}
+          {p.enriched && <Badge variant="success" style={{ fontSize:10 }}>✓ Enriched</Badge>}
+        </div>
+      </div>
+
+      {/* Email row */}
+      {p.email ? (
+        <div style={{ marginTop:10, display:"flex", alignItems:"center", gap:8, background:"#dbeafe", border:"1px solid #93c5fd", borderRadius:6, padding:"8px 12px" }}>
+          <span style={{ fontFamily:"var(--mono)", fontSize:12, color:"var(--accent)", flex:1 }}>✉ {p.email}</span>
+          <button onClick={()=>copyText(p.email, `e-${i}`)} style={{ background:"transparent", border:"none", cursor:"pointer", color:copied===`e-${i}`?"var(--accent3)":"var(--muted)", fontSize:11, fontFamily:"var(--font)", fontWeight:700 }}>
+            {copied===`e-${i}` ? "✓ Copied!" : "📋 Copy"}
+          </button>
+        </div>
+      ) : null}
+
+      {/* Phone row */}
+      {p.phone ? (
+        <div style={{ marginTop:6, display:"flex", alignItems:"center", gap:8, background:"#f0fdf4", border:"1px solid #86efac", borderRadius:6, padding:"8px 12px" }}>
+          <span style={{ fontFamily:"var(--mono)", fontSize:12, color:"#166534", flex:1 }}>📞 {p.phone}</span>
+          <button onClick={()=>copyText(p.phone, `ph-${i}`)} style={{ background:"transparent", border:"none", cursor:"pointer", color:copied===`ph-${i}`?"var(--accent3)":"var(--muted)", fontSize:11, fontFamily:"var(--font)", fontWeight:700 }}>
+            {copied===`ph-${i}` ? "✓ Copied!" : "📋 Copy"}
+          </button>
+        </div>
+      ) : null}
+
+      {/* Action row */}
+      <div style={{ marginTop:8, display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+        {p.linkedin && (
+          <a href={p.linkedin} target="_blank" rel="noreferrer" style={{ fontSize:11, color:"var(--accent2)", textDecoration:"none", fontWeight:600 }}>
+            🔗 LinkedIn
+          </a>
+        )}
+        {showEnrich && !p.enriched && (
+          <button onClick={()=>enrichPerson(i)} disabled={enriching[i]} style={{
+            fontSize:11, fontWeight:700, fontFamily:"var(--font)", border:"1px solid var(--accent)", borderRadius:6,
+            padding:"3px 10px", cursor:enriching[i]?"not-allowed":"pointer",
+            background:enriching[i]?"var(--border)":"#eff6ff", color:"var(--accent)",
+            display:"inline-flex", alignItems:"center", gap:4,
+          }}>
+            {enriching[i] ? <><Spinner size={11}/>Finding...</> : "🔍 Find Email & Phone"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
+  const modeBtn = (m, label) => (
+    <button onClick={()=>{ setMode(m); }} style={{
+      padding:"7px 20px", borderRadius:8, cursor:"pointer", fontSize:13, fontWeight:600,
+      fontFamily:"var(--font)", transition:"all .15s", border:"1px solid var(--border)",
+      background:mode===m?"var(--accent)":"var(--surface)",
+      color:mode===m?"#fff":"var(--muted)", boxShadow:"var(--shadow)",
+    }}>{label}</button>
+>>>>>>> e5462fdddf70b12897fe31fbe39f9e53ea26f9da
   );
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }} className="slide-in">
       <div>
+<<<<<<< HEAD
         <h2 style={{ fontSize:22, fontWeight:800 }}>Apollo.io People Search</h2>
         <p style={{ color:"var(--muted)", fontSize:13, marginTop:4 }}>Search people by name or browse a company. Select people, then find emails &amp; phones — auto-saved to Saved Contacts.</p>
+=======
+        <h2 style={{ fontSize:22, fontWeight:800 }}>Apollo.io Enrichment</h2>
+        <p style={{ color:"var(--muted)", fontSize:13, marginTop:4 }}>Find people by name or browse everyone at a company</p>
+>>>>>>> e5462fdddf70b12897fe31fbe39f9e53ea26f9da
       </div>
 
       {!apolloKey && (
@@ -1051,6 +1229,7 @@ function ApolloView({ settings, leads }) {
         </div>
       )}
 
+<<<<<<< HEAD
       <div style={{ display:"flex", gap:8 }}>
         {modeBtn("person","👤","Person Lookup")}
         {modeBtn("company","🏢","Company People")}
@@ -1067,6 +1246,31 @@ function ApolloView({ settings, leads }) {
             <div style={{ flex:1 }}>
               <Input placeholder="e.g. John Smith Stripe San Francisco" value={pq}
                 onChange={e=>setPq(e.target.value)} onKeyDown={e=>e.key==="Enter"&&searchPeople(1)} />
+=======
+      {/* Mode toggle */}
+      <div style={{ display:"flex", gap:8 }}>
+        {modeBtn("name",    "👤 Person Lookup")}
+        {modeBtn("company", "🏢 Company People")}
+      </div>
+
+      {/* ── MODE 1: Name + Location ───────────────────────────── */}
+      {mode === "name" && (
+        <Card>
+          <Label style={{ fontSize:15, fontWeight:700 }}>🔍 Find Person by Name</Label>
+          <p style={{ fontSize:12, color:"var(--muted)", marginTop:2, marginBottom:14 }}>
+            Enter a name and optional location. Returns their company, title, email and phone.
+          </p>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+            <div>
+              <Label>Full Name *</Label>
+              <Input placeholder="e.g. John Smith" value={nlName} onChange={e=>setNlName(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&searchByName()} />
+            </div>
+            <div>
+              <Label>Location (optional)</Label>
+              <Input placeholder="e.g. San Francisco, CA" value={nlLocation} onChange={e=>setNlLocation(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&searchByName()} />
+>>>>>>> e5462fdddf70b12897fe31fbe39f9e53ea26f9da
             </div>
             <button onClick={()=>searchPeople(1)} disabled={pSearching||!apolloKey} style={{
               background:pSearching||!apolloKey?"var(--border)":"var(--accent)", color:pSearching||!apolloKey?"var(--muted)":"#fff",
@@ -1078,6 +1282,7 @@ function ApolloView({ settings, leads }) {
             </button>
           </div>
 
+<<<<<<< HEAD
           {pError && <div style={{ marginTop:10, background:"#fee2e2", border:"1px solid #fca5a5", borderRadius:8, padding:"10px 14px", color:"var(--danger)", fontSize:12 }}>⚠ {pError}</div>}
 
           {pResults.length > 0 && (
@@ -1343,6 +1548,127 @@ function SavedContactsView() {
               {sortOrder==="desc"?"↓ Newest":"↑ Oldest"}
             </button>
           </div>
+=======
+          <div style={{ marginTop:14 }}>
+            <button onClick={searchByName} disabled={nlSearching||!apolloKey} style={{
+              background:nlSearching||!apolloKey?"var(--border)":"var(--accent)", color:nlSearching||!apolloKey?"var(--muted)":"#fff",
+              border:"none", borderRadius:8, padding:"10px 24px", cursor:nlSearching||!apolloKey?"not-allowed":"pointer",
+              fontFamily:"var(--font)", fontWeight:700, fontSize:14,
+              display:"inline-flex", alignItems:"center", gap:8,
+              boxShadow:nlSearching||!apolloKey?"none":"0 2px 8px rgba(37,99,235,.35)", transition:"all .15s",
+            }}>
+              {nlSearching ? <><Spinner size={15}/>Searching...</> : "🔍 Search Apollo.io"}
+            </button>
+          </div>
+
+          {nlError && (
+            <div style={{ marginTop:12, background:"#fee2e2", border:"1px solid #fca5a5", borderRadius:8, padding:"10px 14px", color:"var(--danger)", fontSize:12 }}>⚠ {nlError}</div>
+          )}
+
+          {nlResults.length > 0 && (
+            <div style={{ marginTop:18, display:"flex", flexDirection:"column", gap:10 }}>
+              <div style={{ fontSize:12, color:"var(--muted)", fontWeight:600 }}>{nlResults.length} result{nlResults.length>1?"s":""} found</div>
+              {nlResults.map((p,i) => <PersonCard key={i} p={p} i={i} showEnrich={false} />)}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* ── MODE 2: Company People Browser ───────────────────── */}
+      {mode === "company" && (
+        <Card>
+          <Label style={{ fontSize:15, fontWeight:700 }}>🏢 Browse All People at a Company</Label>
+          <p style={{ fontSize:12, color:"var(--muted)", marginTop:2, marginBottom:14 }}>
+            Search any company to see all people Apollo has. Then selectively find emails & phones for the ones you want.
+          </p>
+
+          <div style={{ display:"flex", gap:10, alignItems:"flex-end" }}>
+            <div style={{ flex:1 }}>
+              <Label>Company Name *</Label>
+              <Input placeholder="e.g. Stripe, Vercel, Linear..." value={companyName}
+                onChange={e=>setCompanyName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&searchCompanyPeople()} />
+            </div>
+            <button onClick={searchCompanyPeople} disabled={compSearching||!apolloKey} style={{
+              background:compSearching||!apolloKey?"var(--border)":"var(--accent)", color:compSearching||!apolloKey?"var(--muted)":"#fff",
+              border:"none", borderRadius:8, padding:"10px 20px", cursor:compSearching||!apolloKey?"not-allowed":"pointer",
+              fontFamily:"var(--font)", fontWeight:700, fontSize:14,
+              display:"inline-flex", alignItems:"center", gap:8,
+              boxShadow:compSearching||!apolloKey?"none":"0 2px 8px rgba(37,99,235,.35)", transition:"all .15s", whiteSpace:"nowrap",
+            }}>
+              {compSearching ? <><Spinner size={15}/>Searching...</> : "🔍 Search"}
+            </button>
+          </div>
+
+          {compError && (
+            <div style={{ marginTop:12, background:"#fee2e2", border:"1px solid #fca5a5", borderRadius:8, padding:"10px 14px", color:"var(--danger)", fontSize:12 }}>⚠ {compError}</div>
+          )}
+
+          {/* Org info bar */}
+          {compOrg && (
+            <div style={{ marginTop:14, background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:8, padding:"10px 14px", display:"flex", gap:16, flexWrap:"wrap", fontSize:12 }}>
+              <span style={{ fontWeight:700, color:"var(--accent)" }}>🏢 {compOrg.name}</span>
+              {compOrg.domain     && <span style={{ color:"var(--muted)" }}>🌐 {compOrg.domain}</span>}
+              {compOrg.employees  && <span style={{ color:"var(--muted)" }}>👥 {compOrg.employees} employees</span>}
+              {compOrg.industry   && <span style={{ color:"var(--muted)" }}>🏷 {compOrg.industry}</span>}
+            </div>
+          )}
+
+          {/* Results toolbar */}
+          {compPeople.length > 0 && (
+            <>
+              <div style={{ marginTop:14, display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8 }}>
+                <div style={{ fontSize:12, color:"var(--muted)", fontWeight:600 }}>
+                  {compPeople.length} people found
+                  {selectedCount > 0 && <span style={{ color:"var(--accent)", marginLeft:8 }}>· {selectedCount} selected</span>}
+                </div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button onClick={selectAll} style={{ fontSize:11, fontWeight:700, fontFamily:"var(--font)", border:"1px solid var(--border)", borderRadius:6, padding:"4px 12px", cursor:"pointer", background:"var(--surface)", color:"var(--muted)" }}>
+                    ☑ Select All
+                  </button>
+                  {selectedCount > 0 && (
+                    <button onClick={clearAll} style={{ fontSize:11, fontWeight:700, fontFamily:"var(--font)", border:"1px solid var(--border)", borderRadius:6, padding:"4px 12px", cursor:"pointer", background:"var(--surface)", color:"var(--muted)" }}>
+                      ✕ Clear
+                    </button>
+                  )}
+                  <button onClick={enrichSelected} disabled={bulkEnriching||!apolloKey} style={{
+                    fontSize:11, fontWeight:700, fontFamily:"var(--font)",
+                    border:"none", borderRadius:6, padding:"4px 14px", cursor:bulkEnriching?"not-allowed":"pointer",
+                    background:bulkEnriching?"var(--border)":"var(--accent2)", color:"#fff",
+                    display:"inline-flex", alignItems:"center", gap:4,
+                  }}>
+                    {bulkEnriching ? <><Spinner size={11}/>Enriching...</> : `🔍 Find Email & Phone${selectedCount > 0 ? ` (${selectedCount})` : " (All)"}`}
+                  </button>
+                </div>
+              </div>
+
+              {/* People list with checkboxes */}
+              <div style={{ marginTop:10, display:"flex", flexDirection:"column", gap:8 }}>
+                {compPeople.map((p, i) => (
+                  <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:10 }}>
+                    {/* Checkbox */}
+                    <div style={{ paddingTop:16 }}>
+                      <input type="checkbox" checked={!!selected[i]} onChange={()=>toggleSelect(i)}
+                        style={{ width:15, height:15, cursor:"pointer", accentColor:"var(--accent)" }} />
+                    </div>
+                    <div style={{ flex:1 }}>
+                      <PersonCard p={p} i={i} showEnrich={true} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+
+      {/* ── Pipeline stats ────────────────────────────────────── */}
+      <Card>
+        <Label>Pipeline Enrichment Status</Label>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginTop:8 }}>
+          <StatCard label="Total Leads"    value={leads.length}                             accent="#2563eb" icon="📊" />
+          <StatCard label="Contacts Found" value={leads.filter(l=>l.contact_email).length}  accent="#059669" icon="✅" />
+          <StatCard label="Missing"        value={leads.filter(l=>!l.contact_email).length} accent="#dc2626" icon="❌" />
+>>>>>>> e5462fdddf70b12897fe31fbe39f9e53ea26f9da
         </div>
 
         {loading ? (
