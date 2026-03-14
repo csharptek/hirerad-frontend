@@ -820,6 +820,7 @@ function ApolloView({ settings, leads }) {
   const [cSearching, setCSearching] = useState(false);
   const [cResults, setCResults]   = useState([]);
   const [cOrg, setCOrg]           = useState(null);
+  const [cSimilar, setCsimilar]   = useState([]); // similar company suggestions
   const [cSelected, setCSelected] = useState({});
   const [cPage, setCPage]         = useState(1);
   const [cTotal, setCTotal]       = useState(0);
@@ -843,14 +844,16 @@ function ApolloView({ settings, leads }) {
     });
   };
 
-  const searchCompany = async (page = 1) => {
+  const searchCompany = async (page = 1, company_id = null) => {
     if (!apolloKey) { setCError("Add Apollo.io API key in Settings"); return; }
     if (!cq.trim()) { setCError("Enter a company name"); return; }
-    setCSearching(true); setCError(""); if (page===1) { setCResults([]); setCOrg(null); } setCSelected({});
+    setCSearching(true); setCError("");
+    if (page === 1) { setCResults([]); setCOrg(null); if (!company_id) setCsimilar([]); }
+    setCSelected({});
     try {
       const res  = await fetch(`${API_BASE}/apollo/company-people`, {
         method:"POST", headers: proxyHeaders,
-        body: JSON.stringify({ company_name: cq.trim(), seniorities: cSeniorities, page, per_page: PER_PAGE }),
+        body: JSON.stringify({ company_name: cq.trim(), company_id, seniorities: cSeniorities, page, per_page: PER_PAGE }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Search failed");
@@ -858,7 +861,9 @@ function ApolloView({ settings, leads }) {
       setCResults(data.people || []);
       setCTotal(data.total || 0);
       setCPage(page);
-      if (!data.people?.length) setCError("No people found. Try a different company name or remove filters.");
+      // Always store similar companies for the picker
+      if (data.similar?.length > 1) setCsimilar(data.similar);
+      if (!data.people?.length) setCError("No people found for this company. Try selecting a different company below.");
     } catch(err) { setCError(err.message); }
     setCSearching(false);
   };
@@ -1061,7 +1066,7 @@ function ApolloView({ settings, leads }) {
         <Card>
           <Label style={{ fontSize:15, fontWeight:700, marginBottom:4 }}>👤 Person Lookup</Label>
           <p style={{ fontSize:12, color:"var(--muted)", marginBottom:14 }}>
-            Free text search — type name, company, location, or any combination. e.g. <em>"Bhanu Gupta csharptek"</em>
+            Search by name, company, or title. Add a city as the <em>last word</em> to filter by location. e.g. <em>"Bhanu Gupta"</em>, <em>"John Smith Stripe"</em>, <em>"Sarah CEO Ranchi"</em>
           </p>
           <div style={{ display:"flex", gap:10 }}>
             <div style={{ flex:1 }}>
@@ -1149,8 +1154,36 @@ function ApolloView({ settings, leads }) {
 
           {cError && <div style={{ marginTop:10, background:"#fee2e2", border:"1px solid #fca5a5", borderRadius:8, padding:"10px 14px", color:"var(--danger)", fontSize:12 }}>⚠ {cError}</div>}
 
-          {/* Org info bar */}
-          {cOrg && (
+          {/* Similar companies picker — shown when multiple companies found */}
+          {cSimilar.length > 1 && (
+            <div style={{ marginTop:12 }}>
+              <div style={{ fontSize:11, fontWeight:700, color:"var(--muted)", marginBottom:6, textTransform:"uppercase", letterSpacing:.5 }}>
+                🏢 {cSimilar.length} companies matched — click one to browse its people:
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                {cSimilar.map(c => (
+                  <button key={c.id} onClick={()=>searchCompany(1, c.id)} style={{
+                    display:"flex", alignItems:"center", gap:12, padding:"10px 14px",
+                    background:cOrg?.id===c.id?"#eff6ff":"var(--surface2)",
+                    border:`1px solid ${cOrg?.id===c.id?"var(--accent)":"var(--border)"}`,
+                    borderRadius:8, cursor:"pointer", textAlign:"left", transition:"all .15s",
+                  }}>
+                    {c.logo && <img src={c.logo} alt="" style={{ width:24, height:24, borderRadius:4, objectFit:"contain" }} onError={e=>e.target.style.display="none"} />}
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontWeight:700, fontSize:13, color:cOrg?.id===c.id?"var(--accent)":"var(--text)" }}>{c.name}</div>
+                      <div style={{ fontSize:11, color:"var(--muted)", marginTop:1 }}>
+                        {c.domain && `🌐 ${c.domain}`}{c.domain && c.industry ? "  ·  " : ""}{c.industry && `🏷 ${c.industry}`}{c.employees ? `  ·  👥 ${c.employees}` : ""}
+                      </div>
+                    </div>
+                    {cOrg?.id===c.id && <span style={{ fontSize:10, fontWeight:700, color:"var(--accent)", background:"#dbeafe", borderRadius:4, padding:"2px 6px" }}>SELECTED</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Org info bar — shown when a company is selected and has people */}
+          {cOrg && cResults.length > 0 && (
             <div style={{ marginTop:12, background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:8, padding:"10px 14px", display:"flex", gap:16, flexWrap:"wrap", fontSize:12 }}>
               <span style={{ fontWeight:700, color:"var(--accent)" }}>🏢 {cOrg.name}</span>
               {cOrg.domain    && <span style={{ color:"var(--muted)" }}>🌐 {cOrg.domain}</span>}
